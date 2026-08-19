@@ -132,6 +132,21 @@ def unpack_control_plaintext(b: bytes):
     return struct.unpack("<IBi", b)
 
 
+def _coord_e7(value) -> int:
+    """Encode degrees as MAVLink-style 1e-7 integers."""
+    scaled = int(round(float(value) * 10000000.0))
+    if not -2147483648 <= scaled <= 2147483647:
+        raise ValueError("coordinate out of range")
+    return scaled
+
+
+def _alt_mm(value) -> int:
+    scaled = int(round(float(value) * 1000.0))
+    if not -2147483648 <= scaled <= 2147483647:
+        raise ValueError("altitude out of range")
+    return scaled
+
+
 def pack_telemetry_plaintext(
     seq: int,
     latitude: float,
@@ -157,11 +172,11 @@ def pack_telemetry_plaintext(
         raise ValueError("drone_id must fit in uint8")
 
     return struct.pack(
-        "<IfffffffB",
+        "<IiiiffffB",
         int(seq),
-        float(latitude),
-        float(longitude),
-        float(altitude),
+        _coord_e7(latitude),
+        _coord_e7(longitude),
+        _alt_mm(altitude),
         float(battery),
         float(roll),
         float(pitch),
@@ -171,4 +186,17 @@ def pack_telemetry_plaintext(
 
 
 def unpack_telemetry_plaintext(b: bytes):
-    return struct.unpack("<IfffffffB", b)
+    seq, lat_e7, lon_e7, alt_mm, battery, roll, pitch, yaw, drone_id = struct.unpack(
+        "<IiiiffffB", b
+    )
+    return (
+        seq,
+        lat_e7 / 10000000.0,
+        lon_e7 / 10000000.0,
+        alt_mm / 1000.0,
+        battery,
+        roll,
+        pitch,
+        yaw,
+        drone_id,
+    )

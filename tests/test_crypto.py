@@ -54,7 +54,7 @@ def test_pack_unpack_telemetry():
     lat, lon, alt, bat, roll, pitch, yaw = 1.1, 2.2, 3.3, 11.1, 0.1, 0.2, 0.3
     drone_id = 3
     b = mc.pack_telemetry_plaintext(seq, lat, lon, alt, bat, roll, pitch, yaw, drone_id)
-    assert struct.calcsize("<IfffffffB") == len(b)
+    assert struct.calcsize("<IiiiffffB") == len(b)
     s2, lat2, lon2, alt2, bat2, r2, p2, y2, id2 = mc.unpack_telemetry_plaintext(b)
     assert s2 == seq and id2 == drone_id
     assert pytest.approx(lat) == lat2

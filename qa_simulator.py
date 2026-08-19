@@ -5,6 +5,7 @@ import threading
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+import mesh_frame
 import meshtastic_control as control
 import meshtastic_crypto as crypto
 import meshtastic_telemetry as telemetry
@@ -32,6 +33,7 @@ class SimulatedMeshtasticInterface:
         self._stop = threading.Event()
         self._thread = None
         self._seq = 0
+        self.last_control_seq = 0
 
     def start(self):
         if self._thread is not None:
@@ -53,11 +55,11 @@ class SimulatedMeshtasticInterface:
         **kwargs,
     ):
         self.sent.append((data, destinationId, portNum, wantAck, kwargs))
-        if portNum != control.DRONE_CONTROL_COMMAND_DATA_TYPE:
+        framed = mesh_frame.decode_frame(data)
+        if framed is None or framed[0] != mesh_frame.MSG_CONTROL:
             return
-
         try:
-            plaintext = AESGCM(control.KEY).decrypt(data[:12], data[12:], None)
+            plaintext = AESGCM(control.KEY).decrypt(framed[1][:12], framed[1][12:], None)
             seq, drone_id, command = crypto.unpack_control_plaintext(plaintext)
         except Exception:
             return
@@ -68,21 +70,30 @@ class SimulatedMeshtasticInterface:
         status = control.ACK_STATUS_ACCEPTED
         if command == control.COMMAND_SYNC_REQUEST:
             status = control.ACK_STATUS_SYNC
+            if seq > self.last_control_seq:
+                self.last_control_seq = seq
         elif command not in {
             control.COMMAND_RTL,
             control.COMMAND_LAND,
             control.COMMAND_EMERGENCY_LAND,
+            control.COMMAND_HEARTBEAT,
         }:
             status = control.ACK_STATUS_REJECTED
+        elif seq <= self.last_control_seq:
+            status = control.ACK_STATUS_REJECTED
+        else:
+            self.last_control_seq = seq
 
-        ack_plaintext = struct.pack("<IBB", seq, self.drone_id, status)
+        ack_plaintext = struct.pack(
+            "<IBBI", seq, self.drone_id, status, self.last_control_seq
+        )
         self.onReceive.fire(
             {
                 "decoded": {
-                    "data": {
-                        "portnum": control.CONTROL_ACK_DATA_TYPE,
-                        "payload": self._encrypt(control.KEY, ack_plaintext),
-                    }
+                    "portnum": mesh_frame.mesh_portnum(),
+                    "payload": mesh_frame.encode_frame(
+                        mesh_frame.MSG_ACK, self._encrypt(control.KEY, ack_plaintext)
+                    ),
                 }
             }
         )
@@ -107,10 +118,11 @@ class SimulatedMeshtasticInterface:
         self.onReceive.fire(
             {
                 "decoded": {
-                    "data": {
-                        "portnum": telemetry.DRONE_TELEMETRY_DATA_TYPE,
-                        "payload": self._encrypt(telemetry.KEY, plaintext),
-                    }
+                    "portnum": mesh_frame.mesh_portnum(),
+                    "payload": mesh_frame.encode_frame(
+                        mesh_frame.MSG_TELEMETRY,
+                        self._encrypt(telemetry.KEY, plaintext),
+                    ),
                 }
             }
         )

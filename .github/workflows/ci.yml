@@ -29,3 +29,16 @@ jobs:
           mypy --ignore-missing-imports .
       - name: Run tests
         run: pytest -q
+
+  firmware-tree:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check firmware sources exist
+        run: |
+          test -f main/main.cpp
+          test -f main/mesh_codec.cpp
+          test -f main/mavlink_min.cpp
+          test -f sdkconfig.defaults
+          test -f CMakeLists.txt
+          grep -q idf_component_register main/CMakeLists.txt

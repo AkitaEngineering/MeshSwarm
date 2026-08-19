@@ -21,8 +21,8 @@ def test_simulator_emits_telemetry_and_ack(monkeypatch, tmp_path):
 
     deadline = time.time() + 1.0
     while time.time() < deadline:
-        if control._acks.get((4, control.ACK_STATUS_ACCEPTED)) == 123:
+        if control._acks.get((4, 123)) is not None:
             break
         time.sleep(0.01)
 
-    assert control._acks[(4, control.ACK_STATUS_ACCEPTED)] == 123
+    assert control._acks[(4, 123)][0] == control.ACK_STATUS_ACCEPTED

@@ -24,7 +24,8 @@ class EnumLikePort:
 
 
 def test_on_receive_accepts_and_rejects_stale():
-    # fresh packet accepted
+    mt.drone_data.pop(5, None)
+    mt.last_telemetry_seq.pop(5, None)
     wire = make_telemetry_wire(1, 1.0, 2.0, 3.0, 11.1, 5)
     pkt = make_packet(mt.DRONE_TELEMETRY_DATA_TYPE, wire)
     mt.on_receive(pkt, None)
@@ -44,7 +45,32 @@ def test_on_receive_accepts_and_rejects_stale():
     assert mt.drone_data[5]["latitude"] == 1.1
 
 
+def test_telemetry_is_logged(tmp_path, monkeypatch):
+    mt.drone_data.pop(6, None)
+    mt.last_telemetry_seq.pop(6, None)
+    log_path = tmp_path / "drone_telemetry.jsonl"
+    monkeypatch.setenv("MESHTASTIC_TELEMETRY_LOG", str(log_path))
+    wire = make_telemetry_wire(1, 1.0, 2.0, 3.0, 11.1, 6)
+    mt.on_receive(make_packet(mt.DRONE_TELEMETRY_DATA_TYPE, wire), None)
+    text = log_path.read_text(encoding="utf-8")
+    assert '"drone_id":6' in text
+    assert '"latitude":1.0' in text
+
+
+def test_geofence_marks_outside_position(monkeypatch):
+    mt.drone_data.pop(9, None)
+    mt.last_telemetry_seq.pop(9, None)
+    monkeypatch.setenv("MESHTASTIC_GEOFENCE_LAT", "40.0")
+    monkeypatch.setenv("MESHTASTIC_GEOFENCE_LON", "-74.0")
+    monkeypatch.setenv("MESHTASTIC_GEOFENCE_RADIUS_M", "50")
+    wire = make_telemetry_wire(4, 41.0, -74.0, 10.0, 12.0, 9)
+    mt.on_receive(make_packet(mt.DRONE_TELEMETRY_DATA_TYPE, wire), None)
+    assert mt.drone_data[9]["geofence_ok"] is False
+
+
 def test_on_receive_accepts_enum_like_portnum():
+    mt.drone_data.pop(8, None)
+    mt.last_telemetry_seq.pop(8, None)
     wire = make_telemetry_wire(3, 1.0, 2.0, 3.0, 11.1, 8)
     pkt = make_packet(EnumLikePort(), wire)
 

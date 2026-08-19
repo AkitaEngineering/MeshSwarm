@@ -6,8 +6,7 @@
     <title>Drone Swarm GCS</title>
     <!-- Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <!-- Leaflet CSS -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <link rel="stylesheet" href="/static/leaflet.css"/>
     
     <style>
         :root {
@@ -234,9 +233,14 @@
 
     <header>
         <h1>Meshtastic Swarm Control</h1>
-        <div style="display: flex; align-items: center; gap: 8px; font-weight: 600;">
-            <span class="status-dot"></span>
-            SYSTEM ONLINE
+        <div style="display: flex; align-items: center; gap: 12px; font-weight: 600;">
+            <label style="font-size: 0.75rem; color: var(--text-muted); font-weight: 400;">
+                API token
+                <input id="api-token" type="password" autocomplete="off"
+                       style="margin-left: 6px; background: rgba(255,255,255,0.06); border: 1px solid var(--glass-border); color: var(--text-main); border-radius: 6px; padding: 0.3rem 0.5rem;">
+            </label>
+            <span class="status-dot" id="status-dot"></span>
+            <span id="status-text">CONNECTING</span>
         </div>
     </header>
 
@@ -254,7 +258,9 @@
                 <div style="display: flex; gap: 0.5rem; flex-direction: column;">
                     <button class="btn-rtl" onclick="sendSwarmCommand(1)">Return All Home</button>
                     <button class="btn-land" onclick="sendSwarmCommand(2)">Land All</button>
-                    <button class="btn-danger" onclick="sendSwarmCommand(3)">Emergency Land All</button>
+                    <button class="btn-danger" onclick="sendSwarmCommand(3, true)">Emergency Land All</button>
+                    <button class="btn-land" onclick="sendSwarmCommand(4)">Sync Counters</button>
+                    <p id="command-status" style="color: var(--text-muted); font-size: 0.8rem; min-height: 1.2em;"></p>
                 </div>
             </div>
         </div>
@@ -265,37 +271,82 @@
         </div>
     </div>
 
-    <!-- Leaflet JS -->
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/static/leaflet.js"></script>
     <script>
-        // Initialize Map
         const map = L.map('map').setView([40.7128, -74.0060], 13);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        const tiles = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '© OpenStreetMap contributors'
         }).addTo(map);
+        tiles.on('tileerror', () => {
+            document.getElementById('command-status').textContent =
+                'Map tiles unavailable (offline). Coordinates still update.';
+        });
 
         const droneMarkers = {};
         let mapCentered = false;
+        const tokenInput = document.getElementById('api-token');
+        tokenInput.value = localStorage.getItem('meshtastic_api_token') || '';
+        tokenInput.addEventListener('change', () => {
+            localStorage.setItem('meshtastic_api_token', tokenInput.value.trim());
+        });
 
-        function sendCommand(droneId, command) {
-            fetch('/api/control', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({drone_id: droneId, command: command})
-            }).then(r => r.json()).then(data => {
-                console.log("Command sent", data);
-            }).catch(err => console.error(err));
+        function authHeaders(json) {
+            const headers = {};
+            if (json) {
+                headers['Content-Type'] = 'application/json';
+            }
+            const token = tokenInput.value.trim();
+            if (token) {
+                headers['Authorization'] = 'Bearer ' + token;
+            }
+            return headers;
         }
 
-        function sendSwarmCommand(command) {
-            // Send to broadcast ID 255 or individual drones
-            sendCommand(255, command);
+        function setCommandStatus(text, ok) {
+            const el = document.getElementById('command-status');
+            el.textContent = text;
+            el.style.color = ok ? 'var(--success)' : 'var(--danger)';
+        }
+
+        function sendCommand(droneId, command, confirmDanger) {
+            if (confirmDanger && !confirm('Issue emergency land?')) {
+                return;
+            }
+            fetch('/api/control', {
+                method: 'POST',
+                headers: authHeaders(true),
+                body: JSON.stringify({drone_id: droneId, command: command, wait_ack: true})
+            }).then(async r => {
+                const data = await r.json();
+                if (!r.ok) {
+                    setCommandStatus(data.error || ('HTTP ' + r.status), false);
+                    return;
+                }
+                const ack = data.ack_status;
+                const ackText = ack === 1 ? 'accepted' : ack === 2 ? 'synced' : ack === 3 ? 'rejected' : 'no ack yet';
+                setCommandStatus('seq ' + data.seq + ' — ' + ackText, ack !== 3);
+            }).catch(err => setCommandStatus(String(err), false));
+        }
+
+        function sendSwarmCommand(command, confirmDanger) {
+            sendCommand(255, command, confirmDanger);
+        }
+
+        function fenceLabel(data) {
+            if (data.geofence_ok === false) {
+                return `<div class="data-label">Geofence</div><div class="data-value" style="color:var(--danger)">OUT ${data.geofence_distance_m}m</div>`;
+            }
+            if (data.geofence_ok === true) {
+                return `<div class="data-label">Geofence</div><div class="data-value">OK</div>`;
+            }
+            return `<div class="data-label">Status</div><div class="data-value">${data.stale ? 'STALE' : 'LIVE'}</div>`;
         }
 
         function createDroneCard(id, data) {
             const card = document.createElement('div');
             card.className = 'drone-card';
             card.id = `drone-card-${id}`;
+            card.style.opacity = data.stale ? '0.55' : '1';
             card.innerHTML = `
                 <div class="drone-header">
                     <div class="drone-id">Drone #${id}</div>
@@ -310,56 +361,82 @@
                     </div>
                     <div>
                         <div class="data-label">Attitude</div>
-                        <div class="data-value">R:${data.roll.toFixed(1)} P:${data.pitch.toFixed(1)}</div>
+                        <div class="data-value">R:${Number(data.roll).toFixed(1)} P:${Number(data.pitch).toFixed(1)}</div>
                     </div>
                     <div>
                         <div class="data-label">Lat</div>
-                        <div class="data-value">${data.latitude.toFixed(5)}</div>
+                        <div class="data-value">${Number(data.latitude).toFixed(5)}</div>
                     </div>
                     <div>
                         <div class="data-label">Lon</div>
-                        <div class="data-value">${data.longitude.toFixed(5)}</div>
+                        <div class="data-value">${Number(data.longitude).toFixed(5)}</div>
                     </div>
+                    <div>${fenceLabel(data)}</div>
                 </div>
                 <div class="controls">
                     <button class="btn-rtl" onclick="sendCommand(${id}, 1)">RTL</button>
                     <button class="btn-land" onclick="sendCommand(${id}, 2)">Land</button>
+                    <button class="btn-danger" onclick="sendCommand(${id}, 3, true)">E-Land</button>
                 </div>
             `;
             return card;
         }
 
         function updateDroneCard(id, data) {
-            const card = document.getElementById(`drone-card-${id}`);
-            if (card) {
-                card.querySelector('.drone-header div:last-child').textContent = `${data.battery}V`;
-                card.querySelector('.drone-header div:last-child').style.color = data.battery < 11.0 ? 'var(--danger)' : 'var(--success)';
-                const values = card.querySelectorAll('.data-value');
-                values[0].textContent = `${data.altitude}m`;
-                values[1].textContent = `R:${data.roll.toFixed(1)} P:${data.pitch.toFixed(1)}`;
-                values[2].textContent = data.latitude.toFixed(5);
-                values[3].textContent = data.longitude.toFixed(5);
+            const existing = document.getElementById(`drone-card-${id}`);
+            if (!existing) {
+                return;
             }
+            const next = createDroneCard(id, data);
+            existing.replaceWith(next);
+        }
+
+        function fetchStatus() {
+            fetch('/api/status')
+                .then(r => r.json())
+                .then(status => {
+                    const dot = document.getElementById('status-dot');
+                    const text = document.getElementById('status-text');
+                    if (status.connected && status.live_drones > 0) {
+                        dot.style.backgroundColor = 'var(--success)';
+                        text.textContent = 'LIVE (' + status.live_drones + ')';
+                    } else if (status.connected) {
+                        dot.style.backgroundColor = '#f59e0b';
+                        text.textContent = 'RADIO UP';
+                    } else {
+                        dot.style.backgroundColor = 'var(--danger)';
+                        text.textContent = status.error ? 'OFFLINE' : 'NO RADIO';
+                    }
+                    if (status.auth_required && !tokenInput.value.trim()) {
+                        setCommandStatus('API token required', false);
+                    }
+                })
+                .catch(() => {
+                    document.getElementById('status-text').textContent = 'GCS ERROR';
+                    document.getElementById('status-dot').style.backgroundColor = 'var(--danger)';
+                });
         }
 
         function fetchTelemetry() {
-            fetch('/api/telemetry')
-                .then(r => r.json())
-                .then(data => {
+            fetch('/api/telemetry', {headers: authHeaders(false)})
+                .then(async r => {
+                    const data = await r.json();
+                    if (r.status === 401) {
+                        setCommandStatus('unauthorized — set API token', false);
+                        return;
+                    }
                     const container = document.getElementById('drones-container');
                     if (Object.keys(data).length > 0 && container.querySelector('p')) {
-                        container.innerHTML = ''; // clear waiting text
+                        container.innerHTML = '';
                     }
 
                     for (const [id, t] of Object.entries(data)) {
-                        // Update UI
                         if (!document.getElementById(`drone-card-${id}`)) {
                             container.appendChild(createDroneCard(id, t));
                         } else {
                             updateDroneCard(id, t);
                         }
 
-                        // Update Map
                         if (!droneMarkers[id]) {
                             droneMarkers[id] = L.marker([t.latitude, t.longitude]).addTo(map)
                                 .bindPopup(`<b>Drone ${id}</b><br>Alt: ${t.altitude}m<br>Bat: ${t.battery}V`);
@@ -370,14 +447,17 @@
                         } else {
                             droneMarkers[id].setLatLng([t.latitude, t.longitude]);
                             droneMarkers[id].setPopupContent(`<b>Drone ${id}</b><br>Alt: ${t.altitude}m<br>Bat: ${t.battery}V`);
+                            droneMarkers[id].setOpacity(t.stale ? 0.4 : 1.0);
                         }
                     }
                 })
                 .catch(err => console.error("Telemetry fetch error:", err));
         }
 
-        // Poll every 1 seconds
         setInterval(fetchTelemetry, 1000);
+        setInterval(fetchStatus, 2000);
+        fetchStatus();
+        fetchTelemetry();
 
     </script>
 </body>
