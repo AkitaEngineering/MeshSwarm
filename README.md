@@ -1,6 +1,8 @@
-# Meshtastic Drone Swarm Telemetry & Control
+# MeshSwarm
 
 Companion-computer firmware and a ground-control station (GCS) that carry **encrypted MAVLink telemetry and a small command set** over a Meshtastic mesh.
+
+Repository: [github.com/AkitaEngineering/MeshSwarm](https://github.com/AkitaEngineering/MeshSwarm). Previously published as *Meshtastic-Integration-for-DroneBridge32-Swarm*.
 
 This is a control/telemetry link, not a full autopilot. Flight mode still belongs to the flight controller. Bench-test with props off before any flight.
 
@@ -37,6 +39,11 @@ For Serial Module **SIMPLE** mode, compile firmware with `-DMESH_SERIAL_SIMPLE` 
 2. **ESP32 firmware** — ESP-IDF FreeRTOS node in `main/` (Meshtastic codec, MAVLink heartbeat/commands, fail-safes).
 
 ## Installation
+
+```bash
+git clone https://github.com/AkitaEngineering/MeshSwarm.git
+cd MeshSwarm
+```
 
 ### ESP32 firmware
 

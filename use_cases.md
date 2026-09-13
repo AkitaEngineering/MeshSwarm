@@ -1,4 +1,4 @@
-# Use Cases: Meshtastic Drone Swarm Ground Control Station
+# Use Cases: MeshSwarm Ground Control Station
 
 The combination of long-range, low-power LoRa mesh networking (Meshtastic) with autonomous drone telemetry (MAVLink/ESP32) opens up a wide variety of operational scenarios. Because Meshtastic does not rely on cellular networks, Wi-Fi, or satellite internet, this system is ideal for remote, off-grid, and emergency operations.
 

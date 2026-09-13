@@ -21,7 +21,7 @@
 #include "mavlink_min.h"
 #include "mesh_codec.h"
 
-static const char *TAG = "DB32_NODE";
+static const char *TAG = "MESHSWARM";
 
 #define CONSOLE_UART_NUM      UART_NUM_0
 #define MESHTASTIC_UART_NUM   UART_NUM_1
