@@ -72,14 +72,15 @@ MESHTASTIC_FAKE=1 MESHTASTIC_API_TOKEN=qa-token python gcs_app.py
 ## Configuration
 
 * **Drone ID:** default 1. USB console `SETID:2` (persisted in NVS). Rebuild with `-DDRONE_ID=n` for a compile-time default.
-* **AES key (GCS), in order:** `MESHTASTIC_AES_KEY_FILE` (32 hex chars), `MESHTASTIC_AES_KEY`, system keyring, compiled NIST test key (dev only). Set `MESHTASTIC_PRODUCTION=1` or `MESHTASTIC_REQUIRE_KEY=1` to refuse the fallback.
+* **AES key (GCS), in order:** `MESHTASTIC_AES_KEY_FILE` (32 hex chars), `MESHTASTIC_AES_KEY`, system keyring, compiled NIST test key (dev only). Set `MESHTASTIC_PRODUCTION=1` or `MESHTASTIC_REQUIRE_KEY=1` to refuse the fallback. A configured file or env var that is missing or malformed is an error; it will not silently use the test key.
 * **AES key (MCU):** `SETKEYSIG:<32-hex>:<ecdsa-der-hex>` generated with `python scripts/provision_key.py --hex <32 hex chars> --sign-pem /path/to/provisioning_private.pem`. Unsigned `SETKEY:` is compiled out unless `ALLOW_INSECURE_SETKEY`.
 * **Provisioning public key:** replace `provisioning_pubkey.h` and `scripts/provisioning_public.pem` before deployment. Do not commit production private keys.
 * **API token:** `MESHTASTIC_API_TOKEN`. The UI sends `Authorization: Bearer …` from the header field (stored in browser localStorage). Required for `/api/control` and `/api/telemetry` when set.
-* **Bind address:** `MESHTASTIC_GCS_HOST` / `MESHTASTIC_GCS_PORT` (default `127.0.0.1:5000`).
+* **Bind address:** `MESHTASTIC_GCS_HOST` / `MESHTASTIC_GCS_PORT` (default `127.0.0.1:5000`). Binding beyond localhost requires `MESHTASTIC_API_TOKEN` and a non-default AES key.
 * **Serial port:** `MESHTASTIC_SERIAL_PORT` if more than one Meshtastic device is attached.
 * **Mesh port:** `MESHTASTIC_PORTNUM` (default 256).
 * **Heartbeat:** `MESHTASTIC_HEARTBEAT_INTERVAL` seconds (default 15; `0` disables). Aircraft RTL after `LOST_LINK_TIMEOUT_MS` (default 30000) without a valid command/heartbeat.
+* **Command ACK wait:** `MESHTASTIC_ACK_TIMEOUT` seconds (default 5).
 * **Geofence (GCS UI):** `MESHTASTIC_GEOFENCE_LAT`, `MESHTASTIC_GEOFENCE_LON`, `MESHTASTIC_GEOFENCE_RADIUS_M`.
 * **Geofence (aircraft RTL):** USB console `SETFENCE:<lat>:<lon>:<radius_m>` (NVS). Radius `0` disables.
 * **Telemetry log:** `MESHTASTIC_TELEMETRY_LOG` (default `drone_telemetry.jsonl`). Set `MESHTASTIC_TELEMETRY_LOG_DISABLE=1` to turn off.
@@ -99,12 +100,20 @@ Broadcast drone id **255** addresses the whole swarm.
 
 ## Production checklist
 
+The GCS refuses several unsafe combinations on startup:
+
+* `MESHTASTIC_PRODUCTION=1` refuses the compiled test AES key, `MESHTASTIC_FAKE=1`, and a missing API token
+* Binding `MESHTASTIC_GCS_HOST` beyond localhost refuses a missing API token and the compiled test AES key
+* A set-but-invalid `MESHTASTIC_AES_KEY` / `MESHTASTIC_AES_KEY_FILE` is an error (no silent fallback to the test key)
+
+Operator steps:
+
 1. `pip install -r requirements-dev.txt && flake8 --jobs=1 . && mypy --ignore-missing-imports . && pytest -q`
-2. `idf.py build` from a clean checkout with ESP-IDF installed
-3. Replace provisioning public key material; keep the private key offline
-4. Provision a non-default AES key on GCS and every drone; set `MESHTASTIC_PRODUCTION=1`
-5. Set `MESHTASTIC_API_TOKEN` before binding the GCS beyond localhost
-6. Set unique drone IDs, geofence, and lost-link timeout for the site
+2. `idf.py build` from a clean checkout with ESP-IDF installed. Do not compile with `ALLOW_INSECURE_DEFAULT_KEY` or `ALLOW_INSECURE_SETKEY`.
+3. Replace `provisioning_pubkey.h` and `scripts/provisioning_public.pem`; keep the matching private key offline and never commit it
+4. Provision a non-default AES key on the GCS and every drone (`SETKEYSIG`); set `MESHTASTIC_PRODUCTION=1`
+5. Set `MESHTASTIC_API_TOKEN` (required for production and for any non-localhost bind)
+6. Set unique drone IDs, aircraft geofence (`SETFENCE`), and lost-link timeout for the site
 7. Bench-test command ACKs, replay rejection, radio-out RTL, low battery RTL, and geofence RTL with props off
 
 ## Tests

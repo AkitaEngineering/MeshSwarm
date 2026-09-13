@@ -41,6 +41,38 @@ def test_load_key_requires_configured_key(monkeypatch):
         mc.load_key(DEFAULT, require_configured=True)
 
 
+def test_load_key_rejects_missing_key_file(monkeypatch):
+    monkeypatch.setenv("MESHTASTIC_AES_KEY_FILE", "/no/such/meshswarm-key.hex")
+    monkeypatch.delenv("MESHTASTIC_AES_KEY", raising=False)
+    monkeypatch.setattr(mc, "keyring", None)
+    with pytest.raises(RuntimeError, match="not found"):
+        mc.load_key(DEFAULT)
+
+
+def test_load_key_rejects_malformed_key_file(tmp_path, monkeypatch):
+    path = tmp_path / "key.hex"
+    path.write_text("not-hex")
+    monkeypatch.setenv("MESHTASTIC_AES_KEY_FILE", str(path))
+    monkeypatch.delenv("MESHTASTIC_AES_KEY", raising=False)
+    monkeypatch.setattr(mc, "keyring", None)
+    with pytest.raises(RuntimeError, match="not hexadecimal"):
+        mc.load_key(DEFAULT)
+
+
+def test_load_key_rejects_wrong_length_env(monkeypatch):
+    monkeypatch.delenv("MESHTASTIC_AES_KEY_FILE", raising=False)
+    monkeypatch.setenv("MESHTASTIC_AES_KEY", "aabb")
+    monkeypatch.setattr(mc, "keyring", None)
+    with pytest.raises(RuntimeError, match="16 bytes"):
+        mc.load_key(DEFAULT)
+
+
+def test_save_key_to_file_is_private(tmp_path):
+    path = tmp_path / "k.hex"
+    assert mc.save_key_to_file(TEST_KEY, str(path))
+    assert (path.stat().st_mode & 0o777) == 0o600
+
+
 def test_pack_unpack_control():
     seq, drone_id, cmd = 123, 7, 42
     b = mc.pack_control_plaintext(seq, drone_id, cmd)

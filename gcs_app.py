@@ -1,5 +1,7 @@
+import hashlib
 import hmac
 import os
+import sys
 import threading
 from typing import Any
 
@@ -9,6 +11,7 @@ import meshtastic.serial_interface
 
 import mesh_frame
 import meshtastic_control
+import meshtastic_crypto
 import meshtastic_telemetry
 
 _pubsub: Any
@@ -26,7 +29,51 @@ _heartbeat_stop = threading.Event()
 
 
 def _configured_api_token():
-    return os.environ.get("MESHTASTIC_API_TOKEN")
+    raw = os.environ.get("MESHTASTIC_API_TOKEN")
+    if raw is None:
+        return None
+    token = raw.strip()
+    return token or None
+
+
+def _is_loopback_host(host: str) -> bool:
+    return (host or "").strip().lower() in {
+        "127.0.0.1",
+        "localhost",
+        "::1",
+        "ip6-localhost",
+    }
+
+
+def _tokens_match(supplied: str, expected: str) -> bool:
+    if not isinstance(supplied, str) or not isinstance(expected, str):
+        return False
+    left = hashlib.sha256(supplied.encode("utf-8")).digest()
+    right = hashlib.sha256(expected.encode("utf-8")).digest()
+    return hmac.compare_digest(left, right)
+
+
+def validate_startup(host: str | None = None) -> None:
+    """Refuse unsafe GCS combinations before the radio thread starts."""
+    if host is None:
+        host = os.environ.get("MESHTASTIC_GCS_HOST", "127.0.0.1")
+    production = os.environ.get("MESHTASTIC_PRODUCTION") == "1"
+    fake = os.environ.get("MESHTASTIC_FAKE") == "1"
+    token = _configured_api_token()
+    public = not _is_loopback_host(host)
+    using_default = meshtastic_control.KEY == meshtastic_crypto.DEFAULT_KEY
+
+    if production and fake:
+        raise RuntimeError("MESHTASTIC_FAKE=1 is not allowed when MESHTASTIC_PRODUCTION=1")
+    if (production or public) and not token:
+        raise RuntimeError(
+            "MESHTASTIC_API_TOKEN is required in production and when binding "
+            "beyond localhost"
+        )
+    if (production or public) and using_default:
+        raise RuntimeError(
+            "Refusing to start with the compiled default AES key"
+        )
 
 
 def _control_authorized():
@@ -40,7 +87,7 @@ def _control_authorized():
     else:
         supplied = request.headers.get("X-API-Token", "")
 
-    return hmac.compare_digest(supplied, token)
+    return _tokens_match(supplied, token)
 
 
 def _api_authorized():
@@ -148,7 +195,7 @@ def send_command():
         return jsonify({"error": str(exc)}), 500
 
     wait_ack = bool(data.get("wait_ack", command != meshtastic_control.COMMAND_HEARTBEAT))
-    timeout = float(data.get("ack_timeout", 1.5))
+    timeout = float(data.get("ack_timeout", os.environ.get("MESHTASTIC_ACK_TIMEOUT", "5")))
     ack_status = None
     last_seq = None
     if wait_ack:
@@ -213,10 +260,17 @@ def meshtastic_thread():
 
 
 if __name__ == "__main__":
+    host = os.environ.get("MESHTASTIC_GCS_HOST", "127.0.0.1")
+    port = int(os.environ.get("MESHTASTIC_GCS_PORT", "5000"))
+    validate_startup(host)
+    if meshtastic_control.KEY == meshtastic_crypto.DEFAULT_KEY:
+        print(
+            "WARNING: using compiled NIST test AES key. "
+            "Set MESHTASTIC_PRODUCTION=1 and provision a real key before flight.",
+            file=sys.stderr,
+        )
     t = threading.Thread(target=meshtastic_thread, daemon=True)
     t.start()
     hb = threading.Thread(target=_heartbeat_loop, daemon=True)
     hb.start()
-    host = os.environ.get("MESHTASTIC_GCS_HOST", "127.0.0.1")
-    port = int(os.environ.get("MESHTASTIC_GCS_PORT", "5000"))
     app.run(host=host, port=port, debug=False, threaded=True)

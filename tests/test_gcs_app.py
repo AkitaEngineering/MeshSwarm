@@ -126,6 +126,62 @@ def test_subscribe_uses_pubsub_when_no_onreceive(monkeypatch):
     assert subscribed["handler"] is gcs_app.on_receive
 
 
+def test_control_route_wrong_length_token_is_unauthorized(monkeypatch):
+    _install_dummy_interface(monkeypatch)
+    monkeypatch.setenv("MESHTASTIC_API_TOKEN", "secret-token")
+    client = gcs_app.app.test_client()
+    response = client.post(
+        "/api/control",
+        json={"drone_id": 3, "command": 1, "wait_ack": False},
+        headers={"Authorization": "Bearer x"},
+    )
+    assert response.status_code == 401
+
+
+def test_validate_startup_allows_localhost_dev(monkeypatch):
+    monkeypatch.delenv("MESHTASTIC_PRODUCTION", raising=False)
+    monkeypatch.delenv("MESHTASTIC_API_TOKEN", raising=False)
+    monkeypatch.delenv("MESHTASTIC_FAKE", raising=False)
+    gcs_app.validate_startup("127.0.0.1")
+
+
+def test_validate_startup_requires_token_in_production(monkeypatch):
+    monkeypatch.setenv("MESHTASTIC_PRODUCTION", "1")
+    monkeypatch.delenv("MESHTASTIC_API_TOKEN", raising=False)
+    with pytest.raises(RuntimeError, match="MESHTASTIC_API_TOKEN"):
+        gcs_app.validate_startup("127.0.0.1")
+
+
+def test_validate_startup_requires_token_on_public_bind(monkeypatch):
+    monkeypatch.delenv("MESHTASTIC_PRODUCTION", raising=False)
+    monkeypatch.delenv("MESHTASTIC_API_TOKEN", raising=False)
+    with pytest.raises(RuntimeError, match="MESHTASTIC_API_TOKEN"):
+        gcs_app.validate_startup("0.0.0.0")
+
+
+def test_validate_startup_refuses_fake_in_production(monkeypatch):
+    monkeypatch.setenv("MESHTASTIC_PRODUCTION", "1")
+    monkeypatch.setenv("MESHTASTIC_FAKE", "1")
+    monkeypatch.setenv("MESHTASTIC_API_TOKEN", "secret-token")
+    with pytest.raises(RuntimeError, match="MESHTASTIC_FAKE"):
+        gcs_app.validate_startup("127.0.0.1")
+
+
+def test_validate_startup_refuses_default_key_on_public_bind(monkeypatch):
+    monkeypatch.setenv("MESHTASTIC_API_TOKEN", "secret-token")
+    monkeypatch.setattr(meshtastic_control, "KEY", crypto.DEFAULT_KEY)
+    with pytest.raises(RuntimeError, match="default AES key"):
+        gcs_app.validate_startup("0.0.0.0")
+
+
+def test_validate_startup_refuses_default_key_in_production(monkeypatch):
+    monkeypatch.setenv("MESHTASTIC_PRODUCTION", "1")
+    monkeypatch.setenv("MESHTASTIC_API_TOKEN", "secret-token")
+    monkeypatch.setattr(meshtastic_control, "KEY", crypto.DEFAULT_KEY)
+    with pytest.raises(RuntimeError, match="default AES key"):
+        gcs_app.validate_startup("127.0.0.1")
+
+
 def test_on_receive_dispatches_framed_telemetry(monkeypatch):
     meshtastic_telemetry.drone_data.clear()
     meshtastic_telemetry.last_telemetry_seq.clear()

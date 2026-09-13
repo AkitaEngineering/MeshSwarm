@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: [3.10, 3.11]
+        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -41,4 +41,10 @@ jobs:
           test -f main/mavlink_min.cpp
           test -f sdkconfig.defaults
           test -f CMakeLists.txt
+          grep -q 'project(meshswarm)' CMakeLists.txt
           grep -q idf_component_register main/CMakeLists.txt
+          test ! -f scripts/provisioning_private.pem
+          if grep -n 'ALLOW_INSECURE' sdkconfig.defaults CMakeLists.txt main/CMakeLists.txt; then
+            echo 'ALLOW_INSECURE compile flags must not be enabled by default' >&2
+            exit 1
+          fi

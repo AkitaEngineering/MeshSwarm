@@ -14,6 +14,7 @@
 #include "mbedtls/gcm.h"
 #include "mbedtls/md.h"
 #include "mbedtls/pk.h"
+#include "mbedtls/platform_util.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -266,6 +267,7 @@ static bool aes_gcm_decrypt(const uint8_t* nonce, const uint8_t* ciphertext, siz
     int rc = mbedtls_gcm_auth_decrypt(&gcm, clen, nonce, NONCE_LEN, NULL, 0, tag, TAG_LEN,
                                       ciphertext, plaintext);
     mbedtls_gcm_free(&gcm);
+    mbedtls_platform_zeroize(key, sizeof(key));
     return rc == 0;
 }
 
@@ -284,6 +286,7 @@ static bool aes_gcm_encrypt(const uint8_t* plaintext, size_t plen, const uint8_t
     int rc = mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, plen, nonce, NONCE_LEN,
                                        NULL, 0, plaintext, ciphertext, TAG_LEN, tag);
     mbedtls_gcm_free(&gcm);
+    mbedtls_platform_zeroize(key, sizeof(key));
     return rc == 0;
 }
 
@@ -494,6 +497,11 @@ static void on_mesh_payload(uint32_t portnum, const uint8_t* payload, size_t len
         return;
     }
 
+    if (!runtime_key_configured) {
+        ESP_LOGW(TAG, "Ignoring control: AES key not provisioned");
+        return;
+    }
+
     uint8_t plaintext[CONTROL_PAYLOAD_LEN];
     if (!decrypt_blob(inner, inner_len, CONTROL_PAYLOAD_LEN, plaintext)) {
         ESP_LOGE(TAG, "Failed to decrypt incoming control packet.");
@@ -567,7 +575,18 @@ static void task_meshtastic_rx(void *arg) {
 
 static void task_telemetry_tx(void *arg) {
     (void)arg;
+    bool logged_unprovisioned = false;
     while (1) {
+        if (!runtime_key_configured) {
+            if (!logged_unprovisioned) {
+                ESP_LOGW(TAG, "Telemetry paused until SETKEYSIG provisions an AES key");
+                logged_unprovisioned = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+        logged_unprovisioned = false;
+
         uint8_t plaintext[TELEMETRY_PAYLOAD_LEN];
         size_t pos = 0;
 
@@ -591,7 +610,7 @@ static void task_telemetry_tx(void *arg) {
         if (!encrypt_and_send(MESH_MSG_TELEMETRY, plaintext, TELEMETRY_PAYLOAD_LEN, false, 10)) {
             ESP_LOGE(TAG, "Telemetry send failed.");
         } else {
-            ESP_LOGI(TAG, "Telemetry Sent. Seq: %lu", (unsigned long)telemetry_seq);
+            ESP_LOGD(TAG, "Telemetry sent seq=%lu", (unsigned long)telemetry_seq);
         }
 
 #ifndef MESH_SERIAL_SIMPLE
@@ -767,6 +786,20 @@ extern "C" void app_main(void) {
     uart_set_pin(MAVLINK_UART_NUM, MAV_TXD_PIN, MAV_RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
     mesh_link_init();
+#ifdef ALLOW_INSECURE_DEFAULT_KEY
+    ESP_LOGW(TAG, "ALLOW_INSECURE_DEFAULT_KEY is enabled; not for production");
+#endif
+#ifdef ALLOW_INSECURE_SETKEY
+    ESP_LOGW(TAG, "ALLOW_INSECURE_SETKEY is enabled; not for production");
+#endif
+    ESP_LOGI(
+        TAG,
+        "MeshSwarm boot id=%u key=%s fence=%.1fm lost_link=%ums",
+        (unsigned)drone_id,
+        runtime_key_configured ? "nvs" : "UNPROVISIONED",
+        geofence_radius_m,
+        (unsigned)LOST_LINK_TIMEOUT_MS
+    );
     ESP_LOGI(TAG, "UART drivers installed. Starting FreeRTOS Tasks...");
 
     xTaskCreate(task_mavlink_rx, "mavlink_rx", 4096, NULL, 5, NULL);

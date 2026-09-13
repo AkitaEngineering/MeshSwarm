@@ -21,45 +21,45 @@ except Exception:
 _seq_lock = threading.Lock()
 
 
+def _parse_aes128_hex(raw: str, source: str) -> bytes:
+    try:
+        key = bytes.fromhex(raw.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid AES key in {source}: not hexadecimal") from exc
+    if len(key) != 16:
+        raise RuntimeError(
+            f"Invalid AES key in {source}: expected 16 bytes (32 hex chars), got {len(key)}"
+        )
+    return key
+
+
 def load_key(default_key: bytes, require_configured: bool = False) -> bytes:
     """Load AES key from (in order): file (MESHTASTIC_AES_KEY_FILE),
     env (MESHTASTIC_AES_KEY), system keyring (keyring.get_password),
     fallback to default_key unless require_configured is true.
 
     Keys are expected as 32-hex-character strings (16 bytes).
+    An explicitly configured source that is missing or malformed is an
+    error; it does not fall through to the compiled test key.
     """
-    # 1) file
     keyfile = os.environ.get("MESHTASTIC_AES_KEY_FILE")
-    if keyfile and os.path.exists(keyfile):
-        try:
-            with open(keyfile, "r", encoding="utf-8") as f:
-                data = f.read().strip()
-            key = bytes.fromhex(data)
-            if len(key) == 16:
-                return key
-        except Exception:
-            pass
+    if keyfile:
+        if not os.path.exists(keyfile):
+            raise RuntimeError(f"MESHTASTIC_AES_KEY_FILE not found: {keyfile}")
+        with open(keyfile, "r", encoding="utf-8") as handle:
+            return _parse_aes128_hex(handle.read(), keyfile)
 
-    # 2) env var
     env = os.environ.get("MESHTASTIC_AES_KEY")
     if env:
-        try:
-            key = bytes.fromhex(env.strip())
-            if len(key) == 16:
-                return key
-        except Exception:
-            pass
+        return _parse_aes128_hex(env, "MESHTASTIC_AES_KEY")
 
-    # 3) keyring (optional)
     if keyring is not None:
         try:
-            v = keyring.get_password("meshtastic", "aes_key")
-            if v:
-                key = bytes.fromhex(v.strip())
-                if len(key) == 16:
-                    return key
+            stored = keyring.get_password("meshtastic", "aes_key")
         except Exception:
-            pass
+            stored = None
+        if stored:
+            return _parse_aes128_hex(stored, "keyring")
 
     if require_configured:
         raise RuntimeError(
@@ -67,7 +67,6 @@ def load_key(default_key: bytes, require_configured: bool = False) -> bytes:
             "MESHTASTIC_AES_KEY, or a system keyring entry."
         )
 
-    # fallback
     return default_key
 
 
@@ -100,8 +99,10 @@ def next_seq(seq_file: str = ".control_seq") -> int:
 # Key persistence helpers
 def save_key_to_file(key: bytes, path: str) -> bool:
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(key.hex())
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(key.hex())
+        os.chmod(path, 0o600)
         return True
     except Exception:
         return False
