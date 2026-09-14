@@ -5,3 +5,9 @@ __pycache__/
 .control_seq
 drone_telemetry.jsonl
 scripts/provisioning_private.pem
+
+# ESP-IDF (configure with sourced IDF env + idf.py, not distro CMake)
+build/
+sdkconfig
+sdkconfig.old
+managed_components/

@@ -47,10 +47,18 @@ cd MeshSwarm
 
 ### ESP32 firmware
 
-1. Install ESP-IDF (v5.x recommended).
-2. From this repository: `idf.py build` then `idf.py flash monitor`.
-3. Wire MAVLink TX/RX to UART2 (pins 17/16) and Meshtastic UART to UART1 (pins 4/5).
-4. On the drone Meshtastic node enable the Serial Module in **PROTO** mode at 115200 8N1.
+1. Install ESP-IDF **v5.x** (v5.5 is the version this tree is built against).
+2. Load the IDF environment so `idf.py`, IDF CMake **3.30.2**, Ninja **1.12.1**, and `xtensa-esp-elf-gcc` are on `PATH`. Distro CMake 4.x and `arm-none-eabi-gcc` will not configure this project.
+
+   ```bash
+   . $HOME/esp/esp-idf/export.sh          # bash
+   source $HOME/esp/esp-idf/export.fish   # fish
+   ```
+
+   If `cmake --version` still reports 4.x, install the IDF copies: `python $IDF_PATH/tools/idf_tools.py install cmake ninja`, then source `export` again.
+3. From this repository: `idf.py set-target esp32` then `idf.py build` and `idf.py flash monitor`.
+4. Wire MAVLink TX/RX to UART2 (pins 17/16) and Meshtastic UART to UART1 (pins 4/5).
+5. On the drone Meshtastic node enable the Serial Module in **PROTO** mode at 115200 8N1.
 
 No external MAVLink component is required; the firmware includes a minimal encoder/decoder for HEARTBEAT, COMMAND_LONG, GLOBAL_POSITION_INT, SYS_STATUS, and ATTITUDE.
 

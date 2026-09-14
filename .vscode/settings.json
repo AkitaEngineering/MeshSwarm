@@ -1,0 +1,5 @@
+{
+  "cmake.configureOnOpen": false,
+  "idf.espIdfPath": "${env:HOME}/esp/esp-idf",
+  "idf.toolsPath": "${env:HOME}/.espressif"
+}
