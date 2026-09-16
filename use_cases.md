@@ -1,35 +1,37 @@
-# Use Cases: MeshSwarm Ground Control Station
+# Use cases: MeshSwarm ground control
 
-The combination of long-range, low-power LoRa mesh networking (Meshtastic) with autonomous drone telemetry (MAVLink/ESP32) opens up a wide variety of operational scenarios. Because Meshtastic does not rely on cellular networks, Wi-Fi, or satellite internet, this system is ideal for remote, off-grid, and emergency operations.
+MeshSwarm is a **low-rate encrypted telemetry and command link** over Meshtastic LoRa. It is not an autopilot, video link, or inner-loop controller. Telemetry is on the order of one packet every five seconds. The command set is RTL, land, emergency land, counter sync, and heartbeat.
 
-Below are several key use cases where this system excels:
+It can be useful where cellular and Wi-Fi are unavailable, if the flight controller’s own failsafes are configured and the link has been bench-tested with props off.
 
-## 1. Search and Rescue (SAR) Operations
-In remote wilderness areas or disaster zones where cellular infrastructure is non-existent or destroyed, a swarm of drones can be deployed to search for missing persons.
-* **Benefit:** The Meshtastic mesh network allows drones to relay telemetry data through each other. If a drone flies behind a mountain, its telemetry can bounce off another drone positioned higher up, maintaining a connection to the Ground Control Station (GCS).
-* **Execution:** The GCS operator can track all drones simultaneously on the live Leaflet map and use the Swarm "Return All Home" command if weather conditions suddenly deteriorate.
+## 1. Off-grid position monitoring
 
-## 2. Wildfire Monitoring and Perimeter Mapping
-Monitoring the spread of wildfires requires real-time data in austere environments. A swarm of drones equipped with thermal cameras can patrol the perimeter of a fire.
-* **Benefit:** The decentralized nature of the mesh network ensures that if one drone is lost to the fire or runs out of battery, the rest of the swarm continues communicating with the GCS.
-* **Execution:** Telemetry (Altitude, Attitude, GPS) is monitored safely from a distance. If a drone approaches a dangerous thermal updraft, the operator can issue an individual "Land" or "Return to Launch" command instantly over the mesh.
+A small number of aircraft can report lat/lon, altitude, attitude, and battery to a GCS map over the mesh. If one radio hops through another Meshtastic node, telemetry may still arrive after a delay.
 
-## 3. Agricultural Surveying and Precision Farming
-Large farms and ranches often lack full Wi-Fi coverage. A fleet of autonomous drones can be used to monitor crop health, count livestock, or check irrigation systems across thousands of acres.
-* **Benefit:** The system operates entirely on license-free ISM bands (e.g., 915MHz in the US, 868MHz in Europe), meaning farmers do not need to pay for cellular data plans to maintain telemetry links across vast properties.
-* **Execution:** Using the web dashboard, the farmer can monitor the battery levels of the entire fleet. The "Geofencing" feature ensures that drones automatically return home if they stray beyond the property lines.
+The operator can issue RTL or land per aircraft, or broadcast those commands to drone id 255.
 
-## 4. Disaster Recovery & Communications Relay
-After a hurricane, earthquake, or severe storm, communication is often the first thing to go down. Drones can be deployed to act as temporary aerial relay nodes.
-* **Benefit:** By hovering at a high altitude, drones equipped with the ESP-IDF Meshtastic firmware can extend the range of the ground-based emergency responders' Meshtastic radios by tens of miles.
-* **Execution:** The GCS tracks the exact location and altitude of the "relay" drones. The dashboard allows the commander to monitor their battery levels and swap them out individually before they run out of power.
+## 2. Site geofence and lost-link RTL
 
-## 5. Security and Perimeter Patrol
-For large industrial complexes, border security, or event perimeters, multiple drones can fly automated patrol routes.
-* **Benefit:** The AES-GCM encryption ensures that telemetry and control commands cannot be intercepted, spoofed, or replayed by malicious actors.
-* **Execution:** The security team monitors the "Active Nodes" dashboard. If an intruder is detected in a specific sector, the operator can send custom MAVLink commands to reposition the nearest drones to that location.
+The companion computer can command RTL when:
 
-## 6. Anti-Poaching and Wildlife Conservation
-Conservationists tracking animal movements or searching for poachers in massive national parks operate entirely off-grid.
-* **Benefit:** The low-bandwidth, stealthy nature of LoRa transmissions makes it incredibly difficult for poachers to detect the radio signals controlling the drones compared to traditional high-power Wi-Fi video links.
-* **Execution:** Operators use the dark-themed Glassmorphic UI in low-light conditions to track the swarm without ruining their night vision. If a drone's battery drops below 11V, the UI immediately alerts the operator to trigger a return command.
+* the aircraft is outside a circular geofence
+* battery voltage is below the configured threshold
+* the GCS link is lost after it was once acquired
+* the aircraft is armed and never hears the GCS
+* GPS was valid and then goes stale while armed
+
+These are MAVLink `COMMAND_LONG` messages retried until `COMMAND_ACK`. They are not a replacement for the flight controller’s radio-loss failsafe.
+
+## 3. Large-area survey support
+
+On farms or other large sites without Wi-Fi, the GCS can watch battery and position on ISM-band LoRa while the autopilot flies its own mission. MeshSwarm does not upload waypoints or camera payloads.
+
+## 4. Temporary mesh relay tracking
+
+If a drone is used as a Meshtastic relay, the GCS can show where that node is and command it home before the battery is empty. Extending responder radios “tens of miles” depends on antennas, terrain, and duty cycle; it is not guaranteed by this firmware.
+
+## 5. Encrypted command link
+
+Telemetry and commands are AES-128-GCM with replay counters. That stops casual spoofing of the swarm payload. It does not hide that LoRa traffic exists, and a single shared swarm key (the default) means one extracted key can impersonate the fleet. Use per-drone keys (`MESHTASTIC_AES_KEY_<id>`) when that matters.
+
+MeshSwarm does not implement custom “reposition to this sector” MAVLink, thermal cameras, or stealth against a determined RF adversary.

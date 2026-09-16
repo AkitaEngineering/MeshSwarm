@@ -1,13 +1,10 @@
-import os
 import struct
 import threading
 import time
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
 import mesh_frame
 import meshtastic_control as mc
-from meshtastic_crypto import save_seq
+from meshtastic_crypto import encrypt_blob, save_seq
 
 
 class DummyInterface:
@@ -28,10 +25,8 @@ class DummyInterface:
 def simulate_ack(seq, drone_id, status, last_seq, key, delay=0.05):
     time.sleep(delay)
     plaintext = struct.pack("<IBBI", int(seq), int(drone_id), int(status), int(last_seq))
-    aes = AESGCM(key)
-    nonce = os.urandom(12)
-    ct = aes.encrypt(nonce, plaintext, None)
-    wire = mesh_frame.encode_frame(mesh_frame.MSG_ACK, nonce + ct)
+    blob = encrypt_blob(key, plaintext, mesh_frame.MSG_ACK)
+    wire = mesh_frame.encode_frame(mesh_frame.MSG_ACK, blob)
     pkt = {"decoded": {"portnum": mesh_frame.DEFAULT_PORT, "payload": wire}}
     mc._on_receive_control(pkt, None)
 

@@ -11,3 +11,4 @@ build/
 sdkconfig
 sdkconfig.old
 managed_components/
+tests/host/test_host

@@ -15,7 +15,13 @@ except ImportError:  # pragma: no cover - exercised only in minimal installs
 else:
     AESGCM = _AESGCM
 
-from meshtastic_crypto import DEFAULT_KEY, load_key, unpack_telemetry_plaintext
+from meshtastic_crypto import (
+    DEFAULT_KEY,
+    decrypt_blob_any,
+    load_key,
+    load_per_drone_keys,
+    unpack_telemetry_plaintext,
+)
 from mesh_frame import MSG_TELEMETRY, decode_frame, is_swarm_port
 
 REQUIRE_CONFIGURED_KEY = (
@@ -87,12 +93,20 @@ def _log_telemetry(drone_id, record):
         return
 
 
+def keys_to_try() -> list[bytes]:
+    keys: list[bytes] = []
+    for candidate in (KEY, *load_per_drone_keys().values()):
+        if candidate not in keys:
+            keys.append(candidate)
+    return keys
+
+
 def handle_encrypted(payload: bytes) -> None:
     if AESGCM is None or not payload or len(payload) < 12 + 16:
         return
 
     try:
-        plaintext = AESGCM(KEY).decrypt(payload[:12], payload[12:], None)
+        plaintext = decrypt_blob_any(keys_to_try(), payload, MSG_TELEMETRY)
         seq, lat, lon, alt, bat, roll, pitch, yaw, drone_id = unpack_telemetry_plaintext(
             plaintext
         )

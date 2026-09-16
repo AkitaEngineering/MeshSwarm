@@ -1,4 +1,3 @@
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import pytest
 
 pytest.importorskip("flask")
@@ -60,7 +59,9 @@ def test_control_route_sends_encrypted_command(monkeypatch, tmp_path):
     assert framed is not None
     msg_type, payload = framed
     assert msg_type == mesh_frame.MSG_CONTROL
-    plaintext = AESGCM(meshtastic_control.KEY).decrypt(payload[:12], payload[12:], None)
+    plaintext = crypto.decrypt_blob(
+        meshtastic_control.KEY, payload, mesh_frame.MSG_CONTROL
+    )
     assert crypto.unpack_control_plaintext(plaintext) == (7, 3, 1)
 
 
@@ -104,6 +105,49 @@ def test_status_route_reports_disconnected():
     payload = client.get("/api/status").get_json()
     assert payload["connected"] is False
     assert "auth_required" in payload
+    assert "version" in payload
+
+
+def test_status_hides_counts_when_unauthorized(monkeypatch):
+    monkeypatch.setenv("MESHTASTIC_API_TOKEN", "secret-token")
+    client = gcs_app.app.test_client()
+    payload = client.get("/api/status").get_json()
+    assert payload["auth_required"] is True
+    assert "live_drones" not in payload
+    assert "error" not in payload
+    authorized = client.get(
+        "/api/status", headers={"Authorization": "Bearer secret-token"}
+    ).get_json()
+    assert "live_drones" in authorized
+
+
+def test_control_route_rate_limited(monkeypatch):
+    _install_dummy_interface(monkeypatch)
+    monkeypatch.setenv("MESHTASTIC_CONTROL_RATE", "1")
+    monkeypatch.setenv("MESHTASTIC_CONTROL_RATE_WINDOW", "60")
+    gcs_app._control_hits.clear()
+    client = gcs_app.app.test_client()
+    first = client.post(
+        "/api/control", json={"drone_id": 3, "command": 1, "wait_ack": False}
+    )
+    assert first.status_code == 200
+    second = client.post(
+        "/api/control", json={"drone_id": 3, "command": 1, "wait_ack": False}
+    )
+    assert second.status_code == 429
+
+
+def test_interface_is_alive_simulated():
+    class Fake:
+        is_simulated = True
+
+    assert gcs_app.interface_is_alive(Fake()) is True
+    assert gcs_app.interface_is_alive(None) is False
+
+    class Closed:
+        stream = type("S", (), {"is_open": False})()
+
+    assert gcs_app.interface_is_alive(Closed()) is False
 
 
 def test_subscribe_uses_pubsub_when_no_onreceive(monkeypatch):
@@ -186,8 +230,7 @@ def test_on_receive_dispatches_framed_telemetry(monkeypatch):
     meshtastic_telemetry.drone_data.clear()
     meshtastic_telemetry.last_telemetry_seq.clear()
     plaintext = crypto.pack_telemetry_plaintext(9, 1.0, 2.0, 3.0, 12.0, 1)
-    nonce = b"\x11" * 12
-    blob = nonce + AESGCM(meshtastic_telemetry.KEY).encrypt(nonce, plaintext, None)
+    blob = crypto.encrypt_blob(meshtastic_telemetry.KEY, plaintext, mesh_frame.MSG_TELEMETRY)
     packet = {
         "decoded": {
             "portnum": "PRIVATE_APP",

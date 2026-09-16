@@ -1,0 +1,6 @@
+#ifndef MESHSWARM_VERSION_H
+#define MESHSWARM_VERSION_H
+
+#define MESHSWARM_VERSION "0.2.0"
+
+#endif

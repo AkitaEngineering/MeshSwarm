@@ -1,18 +1,13 @@
-import os
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
 import meshtastic_telemetry as mt
 import meshtastic_crypto as mc
+from mesh_frame import MSG_TELEMETRY
 
 KEY = mc.DEFAULT_KEY
 
 
 def make_telemetry_wire(seq, lat, lon, alt, bat, drone_id):
     plaintext = mc.pack_telemetry_plaintext(seq, lat, lon, alt, bat, drone_id)
-    aes = AESGCM(KEY)
-    nonce = os.urandom(12)
-    ct = aes.encrypt(nonce, plaintext, None)
-    return nonce + ct
+    return mc.encrypt_blob(KEY, plaintext, MSG_TELEMETRY)
 
 
 def make_packet(portnum, wire):

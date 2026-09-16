@@ -3,6 +3,8 @@ import hmac
 import os
 import sys
 import threading
+import time
+from collections import deque
 from typing import Any
 
 from flask import Flask, jsonify, render_template, request
@@ -13,6 +15,7 @@ import mesh_frame
 import meshtastic_control
 import meshtastic_crypto
 import meshtastic_telemetry
+from version import __version__
 
 _pubsub: Any
 try:
@@ -25,7 +28,9 @@ app = Flask(__name__)
 interface = None
 interface_error = None
 _receive_subscribed = False
-_heartbeat_stop = threading.Event()
+_shutdown = threading.Event()
+_control_hits: deque[float] = deque()
+_control_hits_lock = threading.Lock()
 
 
 def _configured_api_token():
@@ -94,6 +99,50 @@ def _api_authorized():
     return _control_authorized()
 
 
+def _control_rate_limited() -> bool:
+    raw_limit = os.environ.get("MESHTASTIC_CONTROL_RATE", "8")
+    raw_window = os.environ.get("MESHTASTIC_CONTROL_RATE_WINDOW", "2")
+    try:
+        limit = int(raw_limit)
+        window = float(raw_window)
+    except ValueError:
+        limit, window = 8, 2.0
+    if limit <= 0:
+        return False
+    now = time.monotonic()
+    with _control_hits_lock:
+        while _control_hits and _control_hits[0] <= now - window:
+            _control_hits.popleft()
+        if len(_control_hits) >= limit:
+            return True
+        _control_hits.append(now)
+        return False
+
+
+def interface_is_alive(iface) -> bool:
+    if iface is None:
+        return False
+    if getattr(iface, "is_simulated", False):
+        return True
+    stream = getattr(iface, "stream", None)
+    if stream is None:
+        return True
+    return bool(getattr(stream, "is_open", True))
+
+
+def close_interface(iface) -> None:
+    if iface is None:
+        return
+    for name in ("close", "closeNow"):
+        fn = getattr(iface, name, None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception:
+                pass
+            return
+
+
 def on_receive(packet, received_interface=None):
     data = packet.get("decoded") or {}
     if "data" in data and isinstance(data["data"], dict):
@@ -138,19 +187,26 @@ def index():
 
 @app.route("/api/status")
 def get_status():
+    public = {
+        "connected": interface is not None,
+        "auth_required": bool(_configured_api_token()),
+        "portnum": mesh_frame.mesh_portnum(),
+        "version": __version__,
+    }
+    if _configured_api_token() and not _api_authorized():
+        return jsonify(public)
+
     stale_after = float(os.environ.get("MESHTASTIC_STALE_AFTER", "15"))
     snapshot = meshtastic_telemetry.snapshot(stale_after=stale_after)
     live = sum(1 for item in snapshot.values() if not item.get("stale"))
-    return jsonify(
+    public.update(
         {
-            "connected": interface is not None,
             "error": interface_error,
-            "auth_required": bool(_configured_api_token()),
             "drone_count": len(snapshot),
             "live_drones": live,
-            "portnum": mesh_frame.mesh_portnum(),
         }
     )
+    return jsonify(public)
 
 
 @app.route("/api/telemetry")
@@ -189,6 +245,9 @@ def send_command():
     if command not in allowed_commands:
         return jsonify({"error": "unsupported command"}), 400
 
+    if command != meshtastic_control.COMMAND_HEARTBEAT and _control_rate_limited():
+        return jsonify({"error": "rate limited"}), 429
+
     try:
         seq = meshtastic_control.send_control_command(drone_id, command)
     except Exception as exc:
@@ -221,7 +280,7 @@ def _heartbeat_loop():
         interval = 15.0
     if interval <= 0:
         return
-    while not _heartbeat_stop.wait(interval):
+    while not _shutdown.wait(interval):
         if interface is None:
             continue
         try:
@@ -232,31 +291,66 @@ def _heartbeat_loop():
             continue
 
 
+def _connect_interface():
+    if os.environ.get("MESHTASTIC_FAKE") == "1":
+        from qa_simulator import SimulatedMeshtasticInterface
+
+        interval = float(os.environ.get("MESHTASTIC_FAKE_INTERVAL", "1.0"))
+        drone_id = int(os.environ.get("MESHTASTIC_FAKE_DRONE_ID", "1"))
+        iface = SimulatedMeshtasticInterface(drone_id, interval)
+        iface.is_simulated = True
+        return iface
+
+    port = os.environ.get("MESHTASTIC_SERIAL_PORT") or None
+    iface = meshtastic.serial_interface.SerialInterface(devPath=port)
+    if not hasattr(iface, "sendData"):
+        raise RuntimeError("No Meshtastic serial device with sendData")
+    return iface
+
+
 def meshtastic_thread():
     global interface, interface_error
+    fake = os.environ.get("MESHTASTIC_FAKE") == "1"
+    backoff = 1.5
+    while not _shutdown.is_set():
+        try:
+            iface = _connect_interface()
+            interface = iface
+            meshtastic_control.interface = iface
+            _subscribe_receive(iface)
+            if hasattr(iface, "start"):
+                iface.start()
+            interface_error = None
+            backoff = 1.5
+            while not _shutdown.wait(1.0):
+                if not interface_is_alive(iface):
+                    raise RuntimeError("Meshtastic serial disconnected")
+            break
+        except Exception as exc:
+            close_interface(interface)
+            interface = None
+            meshtastic_control.interface = None
+            interface_error = str(exc)
+            print(f"Meshtastic interface failed: {exc}")
+            if fake:
+                return
+            if _shutdown.wait(backoff):
+                return
+            backoff = min(backoff * 2, 30.0)
+
+
+def run_server(host: str, port: int) -> None:
+    print(f"MeshSwarm GCS {__version__} http://{host}:{port}", file=sys.stderr)
     try:
-        if os.environ.get("MESHTASTIC_FAKE") == "1":
-            from qa_simulator import SimulatedMeshtasticInterface
-
-            interval = float(os.environ.get("MESHTASTIC_FAKE_INTERVAL", "1.0"))
-            drone_id = int(os.environ.get("MESHTASTIC_FAKE_DRONE_ID", "1"))
-            interface = SimulatedMeshtasticInterface(drone_id, interval)
-        else:
-            port = os.environ.get("MESHTASTIC_SERIAL_PORT") or None
-            interface = meshtastic.serial_interface.SerialInterface(devPath=port)
-            if not hasattr(interface, "sendData"):
-                raise RuntimeError("No Meshtastic serial device with sendData")
-
-        meshtastic_control.interface = interface
-        _subscribe_receive(interface)
-        if hasattr(interface, "start"):
-            interface.start()
-        interface_error = None
-    except Exception as exc:
-        interface = None
-        meshtastic_control.interface = None
-        interface_error = str(exc)
-        print(f"Meshtastic interface failed: {exc}")
+        from waitress import serve
+    except ImportError:
+        print(
+            "waitress not installed; falling back to Flask development server",
+            file=sys.stderr,
+        )
+        app.run(host=host, port=port, debug=False, threaded=True)
+        return
+    serve(app, host=host, port=port, threads=8, ident="MeshSwarm")
 
 
 if __name__ == "__main__":
@@ -273,4 +367,4 @@ if __name__ == "__main__":
     t.start()
     hb = threading.Thread(target=_heartbeat_loop, daemon=True)
     hb.start()
-    app.run(host=host, port=port, debug=False, threaded=True)
+    run_server(host, port)

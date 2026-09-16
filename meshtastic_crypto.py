@@ -2,9 +2,19 @@
 Utility helpers for AES key loading, sequence persistence and plaintext packing
 (kept independent from GUI modules so they can be unit-tested).
 """
+from __future__ import annotations
+
 import os
 import struct
 import threading
+from typing import Iterable
+
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM as _AESGCM
+except ImportError:  # pragma: no cover - exercised only in minimal installs
+    AESGCM = None
+else:
+    AESGCM = _AESGCM
 
 # Default AES-128 test key (example). Use secure provisioning in production.
 DEFAULT_KEY = bytes([
@@ -68,6 +78,60 @@ def load_key(default_key: bytes, require_configured: bool = False) -> bytes:
         )
 
     return default_key
+
+
+def load_per_drone_keys() -> dict[int, bytes]:
+    """Optional per-drone AES keys from MESHTASTIC_AES_KEY_<id>=<32 hex chars>."""
+    keys: dict[int, bytes] = {}
+    prefix = "MESHTASTIC_AES_KEY_"
+    for name, raw in os.environ.items():
+        if not name.startswith(prefix):
+            continue
+        suffix = name[len(prefix):]
+        if not suffix.isdigit():
+            continue
+        drone_id = int(suffix)
+        if not 1 <= drone_id <= 254:
+            raise RuntimeError(f"{name}: drone id must be 1-254")
+        keys[drone_id] = _parse_aes128_hex(raw, name)
+    return keys
+
+
+def aad_bytes(msg_type: int) -> bytes:
+    if not 0 <= int(msg_type) <= 0xFF:
+        raise ValueError("msg_type must fit in uint8")
+    return bytes([int(msg_type)])
+
+
+def encrypt_blob(key: bytes, plaintext: bytes, msg_type: int) -> bytes:
+    if AESGCM is None:
+        raise RuntimeError("cryptography is required for AES-GCM")
+    nonce = os.urandom(12)
+    return nonce + AESGCM(key).encrypt(nonce, plaintext, aad_bytes(msg_type))
+
+
+def decrypt_blob(key: bytes, blob: bytes, msg_type: int) -> bytes:
+    if AESGCM is None:
+        raise RuntimeError("cryptography is required for AES-GCM")
+    if not blob or len(blob) < 12 + 16:
+        raise ValueError("ciphertext too short")
+    return AESGCM(key).decrypt(blob[:12], blob[12:], aad_bytes(msg_type))
+
+
+def decrypt_blob_any(keys: Iterable[bytes], blob: bytes, msg_type: int) -> bytes:
+    last_error: Exception | None = None
+    tried = False
+    for key in keys:
+        tried = True
+        try:
+            return decrypt_blob(key, blob, msg_type)
+        except Exception as exc:
+            last_error = exc
+            continue
+    if not tried:
+        raise RuntimeError("no AES keys configured")
+    assert last_error is not None
+    raise last_error
 
 
 # Sequence persistence helpers (used by control clients)

@@ -15,7 +15,10 @@ else:
 
 from meshtastic_crypto import (
     DEFAULT_KEY,
+    decrypt_blob_any,
+    encrypt_blob,
     load_key,
+    load_per_drone_keys,
     load_seq,
     next_seq,
     pack_control_plaintext,
@@ -50,11 +53,24 @@ def _decoded_data(packet):
     return decoded.get("data") or decoded
 
 
-def _encrypt_payload(payload):
+def key_for_command(drone_id) -> bytes:
+    per = load_per_drone_keys()
+    mapped = per.get(int(drone_id))
+    return mapped if mapped is not None else KEY
+
+
+def keys_to_try() -> list[bytes]:
+    keys: list[bytes] = []
+    for candidate in (KEY, *load_per_drone_keys().values()):
+        if candidate not in keys:
+            keys.append(candidate)
+    return keys
+
+
+def _encrypt_payload(payload, drone_id):
     if AESGCM is None:
         raise RuntimeError("cryptography is required for encrypted control")
-    nonce = os.urandom(12)
-    return nonce + AESGCM(KEY).encrypt(nonce, payload, None)
+    return encrypt_blob(key_for_command(drone_id), payload, MSG_CONTROL)
 
 
 def send_control_command(drone_id, command):
@@ -64,7 +80,7 @@ def send_control_command(drone_id, command):
     seq = next_seq()
     payload = pack_control_plaintext(seq, int(drone_id), int(command))
     interface.sendData(
-        encode_frame(MSG_CONTROL, _encrypt_payload(payload)),
+        encode_frame(MSG_CONTROL, _encrypt_payload(payload, drone_id)),
         portNum=mesh_portnum(),
         wantAck=True,
     )
@@ -75,7 +91,7 @@ def handle_encrypted_ack(payload: bytes) -> None:
     if AESGCM is None or not payload or len(payload) < 12 + 16:
         return
     try:
-        plaintext = AESGCM(KEY).decrypt(payload[:12], payload[12:], None)
+        plaintext = decrypt_blob_any(keys_to_try(), payload, MSG_ACK)
         if len(plaintext) != ACK_PLAINTEXT_LEN:
             return
         seq, drone_id, status, last_seq = struct.unpack("<IBBI", plaintext)

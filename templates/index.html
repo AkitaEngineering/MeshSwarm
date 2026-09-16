@@ -4,8 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeshSwarm GCS</title>
-    <!-- Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/leaflet.css"/>
     
     <style>
@@ -25,7 +23,7 @@
         body {
             margin: 0;
             padding: 0;
-            font-family: 'Inter', sans-serif;
+            font-family: ui-sans-serif, system-ui, sans-serif;
             background-color: var(--bg-color);
             background-image: 
                 radial-gradient(circle at 15% 50%, rgba(59, 130, 246, 0.15), transparent 25%),
@@ -173,7 +171,7 @@
             cursor: pointer;
             transition: all 0.2s ease;
             color: white;
-            font-family: 'Inter', sans-serif;
+            font-family: ui-sans-serif, system-ui, sans-serif;
             text-transform: uppercase;
             font-size: 0.8rem;
             letter-spacing: 0.5px;
@@ -290,6 +288,15 @@
             localStorage.setItem('meshtastic_api_token', tokenInput.value.trim());
         });
 
+        function esc(value) {
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         function authHeaders(json) {
             const headers = {};
             if (json) {
@@ -344,39 +351,41 @@
 
         function createDroneCard(id, data) {
             const card = document.createElement('div');
+            const safeId = Number(id);
             card.className = 'drone-card';
-            card.id = `drone-card-${id}`;
+            card.id = `drone-card-${safeId}`;
             card.style.opacity = data.stale ? '0.55' : '1';
+            const batColor = data.battery < 11.0 ? 'var(--danger)' : 'var(--success)';
             card.innerHTML = `
                 <div class="drone-header">
-                    <div class="drone-id">Drone #${id}</div>
-                    <div style="color: ${data.battery < 11.0 ? 'var(--danger)' : 'var(--success)'}">
-                        ${data.battery}V
+                    <div class="drone-id">Drone #${esc(safeId)}</div>
+                    <div style="color: ${batColor}">
+                        ${esc(data.battery)}V
                     </div>
                 </div>
                 <div class="telemetry-grid">
                     <div>
                         <div class="data-label">Altitude</div>
-                        <div class="data-value">${data.altitude}m</div>
+                        <div class="data-value">${esc(data.altitude)}m</div>
                     </div>
                     <div>
                         <div class="data-label">Attitude</div>
-                        <div class="data-value">R:${Number(data.roll).toFixed(1)} P:${Number(data.pitch).toFixed(1)}</div>
+                        <div class="data-value">R:${esc(Number(data.roll).toFixed(1))} P:${esc(Number(data.pitch).toFixed(1))}</div>
                     </div>
                     <div>
                         <div class="data-label">Lat</div>
-                        <div class="data-value">${Number(data.latitude).toFixed(5)}</div>
+                        <div class="data-value">${esc(Number(data.latitude).toFixed(5))}</div>
                     </div>
                     <div>
                         <div class="data-label">Lon</div>
-                        <div class="data-value">${Number(data.longitude).toFixed(5)}</div>
+                        <div class="data-value">${esc(Number(data.longitude).toFixed(5))}</div>
                     </div>
                     <div>${fenceLabel(data)}</div>
                 </div>
                 <div class="controls">
-                    <button class="btn-rtl" onclick="sendCommand(${id}, 1)">RTL</button>
-                    <button class="btn-land" onclick="sendCommand(${id}, 2)">Land</button>
-                    <button class="btn-danger" onclick="sendCommand(${id}, 3, true)">E-Land</button>
+                    <button class="btn-rtl" onclick="sendCommand(${safeId}, 1)">RTL</button>
+                    <button class="btn-land" onclick="sendCommand(${safeId}, 2)">Land</button>
+                    <button class="btn-danger" onclick="sendCommand(${safeId}, 3, true)">E-Land</button>
                 </div>
             `;
             return card;
@@ -392,7 +401,7 @@
         }
 
         function fetchStatus() {
-            fetch('/api/status')
+            fetch('/api/status', {headers: authHeaders(false)})
                 .then(r => r.json())
                 .then(status => {
                     const dot = document.getElementById('status-dot');
@@ -439,14 +448,14 @@
 
                         if (!droneMarkers[id]) {
                             droneMarkers[id] = L.marker([t.latitude, t.longitude]).addTo(map)
-                                .bindPopup(`<b>Drone ${id}</b><br>Alt: ${t.altitude}m<br>Bat: ${t.battery}V`);
+                                .bindPopup(`<b>Drone ${esc(id)}</b><br>Alt: ${esc(t.altitude)}m<br>Bat: ${esc(t.battery)}V`);
                             if (!mapCentered) {
                                 map.setView([t.latitude, t.longitude], 15);
                                 mapCentered = true;
                             }
                         } else {
                             droneMarkers[id].setLatLng([t.latitude, t.longitude]);
-                            droneMarkers[id].setPopupContent(`<b>Drone ${id}</b><br>Alt: ${t.altitude}m<br>Bat: ${t.battery}V`);
+                            droneMarkers[id].setPopupContent(`<b>Drone ${esc(id)}</b><br>Alt: ${esc(t.altitude)}m<br>Bat: ${esc(t.battery)}V`);
                             droneMarkers[id].setOpacity(t.stale ? 0.4 : 1.0);
                         }
                     }

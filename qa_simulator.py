@@ -1,9 +1,6 @@
 """In-process Meshtastic interface simulator for QA runs without hardware."""
-import os
 import struct
 import threading
-
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 import mesh_frame
 import meshtastic_control as control
@@ -25,6 +22,8 @@ class EventHook:
 
 
 class SimulatedMeshtasticInterface:
+    is_simulated = True
+
     def __init__(self, drone_id=1, telemetry_interval=1.0):
         self.drone_id = int(drone_id)
         self.telemetry_interval = float(telemetry_interval)
@@ -59,7 +58,7 @@ class SimulatedMeshtasticInterface:
         if framed is None or framed[0] != mesh_frame.MSG_CONTROL:
             return
         try:
-            plaintext = AESGCM(control.KEY).decrypt(framed[1][:12], framed[1][12:], None)
+            plaintext = crypto.decrypt_blob(control.KEY, framed[1], mesh_frame.MSG_CONTROL)
             seq, drone_id, command = crypto.unpack_control_plaintext(plaintext)
         except Exception:
             return
@@ -92,7 +91,10 @@ class SimulatedMeshtasticInterface:
                 "decoded": {
                     "portnum": mesh_frame.mesh_portnum(),
                     "payload": mesh_frame.encode_frame(
-                        mesh_frame.MSG_ACK, self._encrypt(control.KEY, ack_plaintext)
+                        mesh_frame.MSG_ACK,
+                        crypto.encrypt_blob(
+                            control.KEY, ack_plaintext, mesh_frame.MSG_ACK
+                        ),
                     ),
                 }
             }
@@ -121,13 +123,10 @@ class SimulatedMeshtasticInterface:
                     "portnum": mesh_frame.mesh_portnum(),
                     "payload": mesh_frame.encode_frame(
                         mesh_frame.MSG_TELEMETRY,
-                        self._encrypt(telemetry.KEY, plaintext),
+                        crypto.encrypt_blob(
+                            telemetry.KEY, plaintext, mesh_frame.MSG_TELEMETRY
+                        ),
                     ),
                 }
             }
         )
-
-    @staticmethod
-    def _encrypt(key, plaintext):
-        nonce = os.urandom(12)
-        return nonce + AESGCM(key).encrypt(nonce, plaintext, None)

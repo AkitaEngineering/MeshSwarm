@@ -1,4 +1,3 @@
-#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,8 +18,10 @@
 #include "nvs_flash.h"
 
 #include "../provisioning_pubkey.h"
+#include "failsafe.h"
 #include "mavlink_min.h"
 #include "mesh_codec.h"
+#include "version.h"
 
 static const char *TAG = "MESHSWARM";
 
@@ -66,11 +67,23 @@ static const char *TAG = "MESHSWARM";
 #ifndef LOST_LINK_TIMEOUT_MS
 #define LOST_LINK_TIMEOUT_MS 30000
 #endif
+#ifndef GPS_LOSS_TIMEOUT_MS
+#define GPS_LOSS_TIMEOUT_MS 15000
+#endif
 #ifndef LOW_BATTERY_VOLTAGE
 #define LOW_BATTERY_VOLTAGE 11.0f
 #endif
 #ifndef TELEM_SEQ_SAVE_EVERY
 #define TELEM_SEQ_SAVE_EVERY 12
+#endif
+#ifndef MAV_RETRY_INTERVAL_MS
+#define MAV_RETRY_INTERVAL_MS 400
+#endif
+#ifndef MAV_RETRY_MAX
+#define MAV_RETRY_MAX 8
+#endif
+#ifndef MAV_RETRY_MAX_EMERGENCY
+#define MAV_RETRY_MAX_EMERGENCY 16
 #endif
 
 static uint8_t runtime_key[16];
@@ -109,9 +122,27 @@ static float geofence_radius_m = 0;
 static bool geofence_rtl_sent = false;
 static bool low_batt_rtl_sent = false;
 static bool lost_link_rtl_sent = false;
+static bool gps_loss_rtl_sent = false;
+static bool no_gcs_rtl_sent = false;
 static bool gcs_ever_seen = false;
+static bool fc_heartbeat_seen = false;
+static bool fc_armed = false;
 static int64_t last_gcs_rx_us = 0;
+static int64_t last_gps_us = 0;
+static int64_t boot_us = 0;
 static uint32_t mesh_hb_nonce = 1;
+
+struct PendingMavCommand {
+    uint16_t command;
+    uint8_t confirmation;
+    uint8_t tries;
+    uint8_t max_tries;
+    bool active;
+    bool acked;
+    int64_t last_tx_us;
+};
+
+static PendingMavCommand pending_mav = {};
 
 static void fill_random_bytes(uint8_t* buf, size_t len) {
     esp_fill_random(buf, len);
@@ -253,7 +284,8 @@ static bool copy_runtime_key(uint8_t* out) {
 }
 
 static bool aes_gcm_decrypt(const uint8_t* nonce, const uint8_t* ciphertext, size_t clen,
-                            const uint8_t* tag, uint8_t* plaintext) {
+                            const uint8_t* tag, const uint8_t* aad, size_t aad_len,
+                            uint8_t* plaintext) {
     uint8_t key[16];
     if (!copy_runtime_key(key)) {
         return false;
@@ -264,7 +296,7 @@ static bool aes_gcm_decrypt(const uint8_t* nonce, const uint8_t* ciphertext, siz
         mbedtls_gcm_free(&gcm);
         return false;
     }
-    int rc = mbedtls_gcm_auth_decrypt(&gcm, clen, nonce, NONCE_LEN, NULL, 0, tag, TAG_LEN,
+    int rc = mbedtls_gcm_auth_decrypt(&gcm, clen, nonce, NONCE_LEN, aad, aad_len, tag, TAG_LEN,
                                       ciphertext, plaintext);
     mbedtls_gcm_free(&gcm);
     mbedtls_platform_zeroize(key, sizeof(key));
@@ -272,6 +304,7 @@ static bool aes_gcm_decrypt(const uint8_t* nonce, const uint8_t* ciphertext, siz
 }
 
 static bool aes_gcm_encrypt(const uint8_t* plaintext, size_t plen, const uint8_t* nonce,
+                            const uint8_t* aad, size_t aad_len,
                             uint8_t* ciphertext, uint8_t* tag) {
     uint8_t key[16];
     if (!copy_runtime_key(key)) {
@@ -284,7 +317,7 @@ static bool aes_gcm_encrypt(const uint8_t* plaintext, size_t plen, const uint8_t
         return false;
     }
     int rc = mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, plen, nonce, NONCE_LEN,
-                                       NULL, 0, plaintext, ciphertext, TAG_LEN, tag);
+                                       aad, aad_len, plaintext, ciphertext, TAG_LEN, tag);
     mbedtls_gcm_free(&gcm);
     mbedtls_platform_zeroize(key, sizeof(key));
     return rc == 0;
@@ -304,17 +337,58 @@ static void send_mavlink_command(uint16_t command, uint8_t confirmation) {
     send_mavlink_buffer(buf, len);
 }
 
-static bool seq_is_newer(uint32_t seq, uint32_t last) {
-    if (seq > last) {
-        return true;
+static void queue_mav_command(uint16_t command, uint8_t confirmation, uint8_t max_tries) {
+    pending_mav.command = command;
+    pending_mav.confirmation = confirmation;
+    pending_mav.max_tries = max_tries;
+    pending_mav.tries = 0;
+    pending_mav.active = true;
+    pending_mav.acked = false;
+    pending_mav.last_tx_us = 0;
+}
+
+static void service_pending_mav(int64_t now_us) {
+    if (!pending_mav.active || pending_mav.acked) {
+        return;
     }
-    return last > 0xF0000000u && seq < 0x10000000u;
+    if (pending_mav.tries >= pending_mav.max_tries) {
+        ESP_LOGE(TAG, "MAVLink cmd %u not ACKed after %u tries",
+                 (unsigned)pending_mav.command, (unsigned)pending_mav.tries);
+        pending_mav.active = false;
+        return;
+    }
+    if (pending_mav.last_tx_us != 0 &&
+        (now_us - pending_mav.last_tx_us) < ((int64_t)MAV_RETRY_INTERVAL_MS * 1000)) {
+        return;
+    }
+    send_mavlink_command(pending_mav.command, pending_mav.confirmation);
+    pending_mav.last_tx_us = now_us;
+    pending_mav.tries++;
+}
+
+static void on_mavlink_command_ack(uint16_t command, uint8_t result) {
+    if (!pending_mav.active || command != pending_mav.command) {
+        return;
+    }
+    if (result == MAV_RESULT_ACCEPTED || result == MAV_RESULT_IN_PROGRESS) {
+        pending_mav.acked = true;
+        pending_mav.active = false;
+        ESP_LOGI(TAG, "MAVLink cmd %u ACKed result=%u", (unsigned)command, (unsigned)result);
+        return;
+    }
+    if (result == MAV_RESULT_TEMPORARILY_REJECTED) {
+        ESP_LOGW(TAG, "MAVLink cmd %u temporarily rejected; retrying", (unsigned)command);
+        return;
+    }
+    ESP_LOGE(TAG, "MAVLink cmd %u rejected result=%u", (unsigned)command, (unsigned)result);
+    pending_mav.active = false;
 }
 
 static void mark_gcs_seen(void) {
     gcs_ever_seen = true;
     last_gcs_rx_us = esp_timer_get_time();
     lost_link_rtl_sent = false;
+    no_gcs_rtl_sent = false;
 }
 
 static bool encrypt_and_send(uint8_t msg_type, const uint8_t* plaintext, size_t plen,
@@ -326,7 +400,8 @@ static bool encrypt_and_send(uint8_t msg_type, const uint8_t* plaintext, size_t 
         return false;
     }
     fill_random_bytes(nonce, NONCE_LEN);
-    if (!aes_gcm_encrypt(plaintext, plen, nonce, ciphertext, tag)) {
+    uint8_t aad = msg_type;
+    if (!aes_gcm_encrypt(plaintext, plen, nonce, &aad, 1, ciphertext, tag)) {
         return false;
     }
 
@@ -353,64 +428,95 @@ static void send_control_ack(uint32_t request_seq, uint8_t status) {
     encrypt_and_send(MESH_MSG_ACK, plaintext, CONTROL_ACK_PAYLOAD_LEN, false, 70);
 }
 
-static float haversine_m(float lat1, float lon1, float lat2, float lon2) {
-    const float r = 6371000.0f;
-    const float deg2rad = 0.01745329252f;
-    float p1 = lat1 * deg2rad;
-    float p2 = lat2 * deg2rad;
-    float dphi = (lat2 - lat1) * deg2rad;
-    float dlmb = (lon2 - lon1) * deg2rad;
-    float a = sinf(dphi / 2) * sinf(dphi / 2) +
-              cosf(p1) * cosf(p2) * sinf(dlmb / 2) * sinf(dlmb / 2);
-    if (a > 1.0f) {
-        a = 1.0f;
+static const char* failsafe_reason_name(failsafe_reason_t reason) {
+    switch (reason) {
+        case FAILSAFE_REASON_GEOFENCE:
+            return "geofence";
+        case FAILSAFE_REASON_LOW_BATTERY:
+            return "low_battery";
+        case FAILSAFE_REASON_LOST_LINK:
+            return "lost_link";
+        case FAILSAFE_REASON_NO_GCS:
+            return "no_gcs";
+        case FAILSAFE_REASON_GPS_LOSS:
+            return "gps_loss";
+        default:
+            return "none";
     }
-    return 2.0f * r * asinf(sqrtf(a));
 }
 
-static bool gps_valid(const DroneTelemetry* telem) {
-    return telem->lat_e7 != 0 || telem->lon_e7 != 0;
+static bool* latch_for_reason(failsafe_reason_t reason) {
+    switch (reason) {
+        case FAILSAFE_REASON_GEOFENCE:
+            return &geofence_rtl_sent;
+        case FAILSAFE_REASON_LOW_BATTERY:
+            return &low_batt_rtl_sent;
+        case FAILSAFE_REASON_LOST_LINK:
+            return &lost_link_rtl_sent;
+        case FAILSAFE_REASON_NO_GCS:
+            return &no_gcs_rtl_sent;
+        case FAILSAFE_REASON_GPS_LOSS:
+            return &gps_loss_rtl_sent;
+        default:
+            return NULL;
+    }
 }
 
 static void maybe_failsafe(void) {
     DroneTelemetry snap;
+    int64_t gps_us;
     portENTER_CRITICAL(&telemetry_spinlock);
     snap = current_telemetry;
+    gps_us = last_gps_us;
     portEXIT_CRITICAL(&telemetry_spinlock);
 
-    if (geofence_radius_m > 0.0f && gps_valid(&snap)) {
+    int64_t now = esp_timer_get_time();
+    failsafe_input_t in = {};
+    in.armed_known = fc_heartbeat_seen;
+    in.armed = fc_armed;
+    in.gcs_ever_seen = gcs_ever_seen;
+    in.gps_valid = gps_fix_valid(snap.lat_e7, snap.lon_e7);
+    in.now_us = now;
+    in.boot_us = boot_us;
+    in.last_gcs_us = last_gcs_rx_us;
+    in.last_gps_us = gps_us;
+    in.battery_v = snap.batteryVoltage;
+    in.geofence_radius_m = geofence_radius_m;
+    in.geofence_distance_m = 0;
+    in.low_battery_v = LOW_BATTERY_VOLTAGE;
+    in.lost_link_timeout_ms = LOST_LINK_TIMEOUT_MS;
+    in.gps_loss_timeout_ms = GPS_LOSS_TIMEOUT_MS;
+    if (geofence_radius_m > 0.0f && in.gps_valid) {
         float lat = snap.lat_e7 / 10000000.0f;
         float lon = snap.lon_e7 / 10000000.0f;
-        float dist = haversine_m(geofence_lat, geofence_lon, lat, lon);
-        if (dist > geofence_radius_m) {
-            if (!geofence_rtl_sent) {
-                ESP_LOGW(TAG, "Geofence breach (%.1fm); RTL", dist);
-                send_mavlink_command(MAV_CMD_NAV_RETURN_TO_LAUNCH, 0);
-                geofence_rtl_sent = true;
-            }
-        } else {
+        in.geofence_distance_m = haversine_m(geofence_lat, geofence_lon, lat, lon);
+    }
+
+    failsafe_reason_t reason = FAILSAFE_REASON_NONE;
+    failsafe_action_t action = failsafe_evaluate(&in, &reason);
+    if (action == FAILSAFE_ACTION_RTL) {
+        bool* latch = latch_for_reason(reason);
+        if (latch && !*latch) {
+            ESP_LOGW(TAG, "Failsafe RTL (%s)", failsafe_reason_name(reason));
+            queue_mav_command(MAV_CMD_NAV_RETURN_TO_LAUNCH, 0, MAV_RETRY_MAX);
+            *latch = true;
+        } else if (latch && *latch && !pending_mav.active && !pending_mav.acked) {
+            queue_mav_command(MAV_CMD_NAV_RETURN_TO_LAUNCH, 0, MAV_RETRY_MAX);
+        }
+    } else {
+        if (geofence_radius_m <= 0.0f ||
+            in.geofence_distance_m <= geofence_radius_m) {
             geofence_rtl_sent = false;
         }
-    }
-
-    if (snap.batteryVoltage > 0.5f && snap.batteryVoltage < LOW_BATTERY_VOLTAGE) {
-        if (!low_batt_rtl_sent) {
-            ESP_LOGW(TAG, "Low battery %.2fV; RTL", snap.batteryVoltage);
-            send_mavlink_command(MAV_CMD_NAV_RETURN_TO_LAUNCH, 0);
-            low_batt_rtl_sent = true;
+        if (snap.batteryVoltage >= LOW_BATTERY_VOLTAGE) {
+            low_batt_rtl_sent = false;
         }
-    } else if (snap.batteryVoltage >= LOW_BATTERY_VOLTAGE) {
-        low_batt_rtl_sent = false;
-    }
-
-    if (gcs_ever_seen && !lost_link_rtl_sent) {
-        int64_t now = esp_timer_get_time();
-        if ((now - last_gcs_rx_us) > ((int64_t)LOST_LINK_TIMEOUT_MS * 1000)) {
-            ESP_LOGW(TAG, "Lost GCS link; RTL");
-            send_mavlink_command(MAV_CMD_NAV_RETURN_TO_LAUNCH, 0);
-            lost_link_rtl_sent = true;
+        if (gps_is_fresh(now, gps_us, GPS_LOSS_TIMEOUT_MS)) {
+            gps_loss_rtl_sent = false;
         }
     }
+
+    service_pending_mav(now);
 }
 
 static void handle_control_plaintext(const uint8_t* plaintext) {
@@ -446,15 +552,15 @@ static void handle_control_plaintext(const uint8_t* plaintext) {
     switch (command) {
         case COMMAND_RTL:
             ESP_LOGI(TAG, "Executing RTL");
-            send_mavlink_command(MAV_CMD_NAV_RETURN_TO_LAUNCH, 0);
+            queue_mav_command(MAV_CMD_NAV_RETURN_TO_LAUNCH, 0, MAV_RETRY_MAX);
             break;
         case COMMAND_LAND:
             ESP_LOGI(TAG, "Executing Land");
-            send_mavlink_command(MAV_CMD_NAV_LAND, 0);
+            queue_mav_command(MAV_CMD_NAV_LAND, 0, MAV_RETRY_MAX);
             break;
         case COMMAND_EMERGENCY_LAND:
             ESP_LOGW(TAG, "Executing Emergency Land");
-            send_mavlink_command(MAV_CMD_NAV_LAND, 1);
+            queue_mav_command(MAV_CMD_NAV_LAND, 1, MAV_RETRY_MAX_EMERGENCY);
             break;
         case COMMAND_HEARTBEAT:
             break;
@@ -470,12 +576,13 @@ static void handle_control_plaintext(const uint8_t* plaintext) {
 }
 
 static bool decrypt_blob(const uint8_t* blob, size_t blob_len, size_t plaintext_len,
-                         uint8_t* plaintext) {
+                         uint8_t msg_type, uint8_t* plaintext) {
     if (blob_len != NONCE_LEN + plaintext_len + TAG_LEN) {
         return false;
     }
+    uint8_t aad = msg_type;
     return aes_gcm_decrypt(blob, blob + NONCE_LEN, plaintext_len,
-                           blob + NONCE_LEN + plaintext_len, plaintext);
+                           blob + NONCE_LEN + plaintext_len, &aad, 1, plaintext);
 }
 
 static void on_mesh_payload(uint32_t portnum, const uint8_t* payload, size_t len) {
@@ -503,7 +610,7 @@ static void on_mesh_payload(uint32_t portnum, const uint8_t* payload, size_t len
     }
 
     uint8_t plaintext[CONTROL_PAYLOAD_LEN];
-    if (!decrypt_blob(inner, inner_len, CONTROL_PAYLOAD_LEN, plaintext)) {
+    if (!decrypt_blob(inner, inner_len, CONTROL_PAYLOAD_LEN, msg_type, plaintext)) {
         ESP_LOGE(TAG, "Failed to decrypt incoming control packet.");
         return;
     }
@@ -511,6 +618,18 @@ static void on_mesh_payload(uint32_t portnum, const uint8_t* payload, size_t len
 }
 
 static void apply_mavlink_message(const mavlink_min_message_t* msg) {
+    if (msg->msgid == MAVLINK_MSG_ID_COMMAND_ACK && msg->payload_len >= 3) {
+        uint16_t command = 0;
+        memcpy(&command, msg->payload, 2);
+        on_mavlink_command_ack(command, msg->payload[2]);
+        return;
+    }
+    if (msg->msgid == MAVLINK_MSG_ID_HEARTBEAT && msg->payload_len >= 7) {
+        fc_heartbeat_seen = true;
+        fc_armed = (msg->payload[6] & MAV_MODE_FLAG_SAFETY_ARMED) != 0;
+        return;
+    }
+
     portENTER_CRITICAL(&telemetry_spinlock);
     if (msg->msgid == MAVLINK_MSG_ID_GLOBAL_POSITION_INT && msg->payload_len >= 28) {
         int32_t lat, lon, alt;
@@ -520,6 +639,9 @@ static void apply_mavlink_message(const mavlink_min_message_t* msg) {
         current_telemetry.lat_e7 = lat;
         current_telemetry.lon_e7 = lon;
         current_telemetry.alt_mm = alt;
+        if (gps_fix_valid(lat, lon)) {
+            last_gps_us = esp_timer_get_time();
+        }
     } else if (msg->msgid == MAVLINK_MSG_ID_SYS_STATUS && msg->payload_len >= 16) {
         uint16_t mv;
         memcpy(&mv, msg->payload + 14, 2);
@@ -786,19 +908,25 @@ extern "C" void app_main(void) {
     uart_set_pin(MAVLINK_UART_NUM, MAV_TXD_PIN, MAV_RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
     mesh_link_init();
+    boot_us = esp_timer_get_time();
 #ifdef ALLOW_INSECURE_DEFAULT_KEY
     ESP_LOGW(TAG, "ALLOW_INSECURE_DEFAULT_KEY is enabled; not for production");
 #endif
 #ifdef ALLOW_INSECURE_SETKEY
     ESP_LOGW(TAG, "ALLOW_INSECURE_SETKEY is enabled; not for production");
 #endif
+    if (strstr(PROVISIONING_PUBKEY_PEM, "I94p9P2aSH1NbHwgqh/dPqgjreAC") != NULL) {
+        ESP_LOGW(TAG, "Repository test provisioning pubkey in use; replace before deployment");
+    }
     ESP_LOGI(
         TAG,
-        "MeshSwarm boot id=%u key=%s fence=%.1fm lost_link=%ums",
+        "MeshSwarm %s boot id=%u key=%s fence=%.1fm lost_link=%ums gps_loss=%ums",
+        MESHSWARM_VERSION,
         (unsigned)drone_id,
         runtime_key_configured ? "nvs" : "UNPROVISIONED",
         geofence_radius_m,
-        (unsigned)LOST_LINK_TIMEOUT_MS
+        (unsigned)LOST_LINK_TIMEOUT_MS,
+        (unsigned)GPS_LOSS_TIMEOUT_MS
     );
     ESP_LOGI(TAG, "UART drivers installed. Starting FreeRTOS Tasks...");
 

@@ -3,7 +3,6 @@ import struct
 import threading
 
 import pytest
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 import meshtastic_crypto as mc
 
@@ -128,11 +127,39 @@ def test_pack_control_rejects_out_of_range_fields():
 
 
 def test_aes_gcm_roundtrip_control():
-    key = TEST_KEY
-    aes = AESGCM(key)
     seq, drone_id, cmd = 99, 2, 7
     plaintext = mc.pack_control_plaintext(seq, drone_id, cmd)
-    nonce = os.urandom(12)
-    ct = aes.encrypt(nonce, plaintext, None)
-    pt = AESGCM(key).decrypt(nonce, ct, None)
-    assert pt == plaintext
+    blob = mc.encrypt_blob(TEST_KEY, plaintext, 2)
+    assert mc.decrypt_blob(TEST_KEY, blob, 2) == plaintext
+
+
+def test_aad_mismatch_fails():
+    plaintext = mc.pack_control_plaintext(1, 1, 1)
+    blob = mc.encrypt_blob(TEST_KEY, plaintext, 2)
+    with pytest.raises(Exception):
+        mc.decrypt_blob(TEST_KEY, blob, 1)
+
+
+def test_load_per_drone_keys(monkeypatch):
+    monkeypatch.setenv("MESHTASTIC_AES_KEY_3", TEST_HEX)
+    monkeypatch.setenv("MESHTASTIC_AES_KEY_FILE", "/unused")
+    keys = mc.load_per_drone_keys()
+    assert keys[3] == TEST_KEY
+    assert 1 not in keys
+
+
+def test_decrypt_blob_any_tries_second_key():
+    other = bytes.fromhex("ffeeddccbbaa99887766554433221100")
+    plaintext = b"hello-aad-world!!"
+    blob = mc.encrypt_blob(other, plaintext, 1)
+    assert mc.decrypt_blob_any([TEST_KEY, other], blob, 1) == plaintext
+
+
+def test_per_drone_key_used_for_command(monkeypatch):
+    import meshtastic_control as control
+
+    monkeypatch.setenv("MESHTASTIC_AES_KEY_7", TEST_HEX)
+    monkeypatch.setattr(control, "KEY", b"\x00" * 16)
+    assert control.key_for_command(7) == TEST_KEY
+    assert control.key_for_command(1) == b"\x00" * 16
+    assert control.key_for_command(255) == b"\x00" * 16

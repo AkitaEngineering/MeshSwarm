@@ -33,3 +33,11 @@ def _isolate_side_effects(tmp_path, monkeypatch):
     monkeypatch.delenv("MESHTASTIC_GEOFENCE_LAT", raising=False)
     monkeypatch.delenv("MESHTASTIC_GEOFENCE_LON", raising=False)
     monkeypatch.delenv("MESHTASTIC_GEOFENCE_RADIUS_M", raising=False)
+    monkeypatch.delenv("MESHTASTIC_CONTROL_RATE", raising=False)
+    monkeypatch.delenv("MESHTASTIC_CONTROL_RATE_WINDOW", raising=False)
+    for name in list(os.environ):
+        if name.startswith("MESHTASTIC_AES_KEY_"):
+            monkeypatch.delenv(name, raising=False)
+    import gcs_app
+
+    gcs_app._control_hits.clear()

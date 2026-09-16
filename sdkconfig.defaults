@@ -2,3 +2,6 @@ CONFIG_MBEDTLS_PEM_PARSE_C=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=n
 CONFIG_MBEDTLS_HARDWARE_AES=y
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+# Secure boot and flash encryption stay off in this tree. Enable them with
+# your own signing keys before fielding hardware; see the README.
+

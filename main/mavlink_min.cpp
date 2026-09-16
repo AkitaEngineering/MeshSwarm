@@ -93,7 +93,8 @@ static size_t pack_v2(uint8_t* out, size_t out_len, uint32_t msgid, const uint8_
     }
     uint16_t crc;
     crc_init(&crc);
-    for (size_t i = 1; i < 10 + payload_len; i++) {
+    size_t crc_end = 10 + (size_t)payload_len;
+    for (size_t i = 1; i < crc_end; i++) {
         crc_accumulate(&crc, out[i]);
     }
     crc_accumulate(&crc, crc_extra_for(msgid));

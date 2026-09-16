@@ -5,6 +5,10 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -30,15 +34,21 @@ jobs:
       - name: Run tests
         run: pytest -q
 
-  firmware-tree:
+  firmware-host:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check firmware sources exist
+      - name: Install host toolchain
+        run: sudo apt-get update && sudo apt-get install -y g++ make
+      - name: Run host firmware tests
+        run: make -C tests/host
+      - name: Check firmware sources and insecure flags
         run: |
           test -f main/main.cpp
           test -f main/mesh_codec.cpp
+          test -f main/mesh_frame.cpp
           test -f main/mavlink_min.cpp
+          test -f main/failsafe.cpp
           test -f sdkconfig.defaults
           test -f CMakeLists.txt
           grep -q 'project(meshswarm)' CMakeLists.txt
@@ -48,3 +58,23 @@ jobs:
             echo 'ALLOW_INSECURE compile flags must not be enabled by default' >&2
             exit 1
           fi
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          header = Path("main/version.h").read_text(encoding="utf-8")
+          python = Path("version.py").read_text(encoding="utf-8")
+          vh = re.search(r'MESHSWARM_VERSION "([^"]+)"', header).group(1)
+          vp = re.search(r'__version__ = "([^"]+)"', python).group(1)
+          assert vh == vp, (vh, vp)
+          PY
+
+  firmware-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ESP32 firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5
+          target: esp32
+          path: '.'

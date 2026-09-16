@@ -3,5 +3,7 @@ exclude =
     .git,
     .pytest_cache,
     .venv,
-    __pycache__
+    __pycache__,
+    build,
+    tests/host
 max-line-length = 100

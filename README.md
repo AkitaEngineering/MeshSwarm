@@ -8,11 +8,11 @@ This is a control/telemetry link, not a full autopilot. Flight mode still belong
 
 ## What it does
 
-* AES-GCM encrypted telemetry (position, altitude, attitude, battery) and commands (RTL, land, emergency land, counter sync, heartbeat)
+* AES-GCM encrypted telemetry (position, altitude, attitude, battery) and commands (RTL, land, emergency land, counter sync, heartbeat). Message type is bound as GCM AAD (0.2.0+; GCS and firmware must match)
 * Replay protection with persisted sequence numbers
 * Signed AES-key provisioning on the ESP32 (`SETKEYSIG`)
-* Lost-link, low-battery, and circular geofence RTL on the aircraft
-* Web GCS with live map, command ACKs, API token, and JSONL telemetry log
+* Lost-link, never-acquired-GCS (when FC reports armed), GPS-loss, low-battery, and circular geofence RTL, with MAVLink `COMMAND_ACK` retries
+* Web GCS (Waitress) with live map, command ACKs, API token, serial reconnect, and JSONL telemetry log
 * In-process fake radio (`MESHTASTIC_FAKE=1`) for app QA without hardware
 
 ## Architecture
@@ -35,7 +35,7 @@ For Serial Module **SIMPLE** mode, compile firmware with `-DMESH_SERIAL_SIMPLE` 
 
 ## Components
 
-1. **Ground Control Station** — Flask app (`gcs_app.py`) plus Leaflet UI.
+1. **Ground Control Station** — Waitress/Flask app (`gcs_app.py`) plus Leaflet UI.
 2. **ESP32 firmware** — ESP-IDF FreeRTOS node in `main/` (Meshtastic codec, MAVLink heartbeat/commands, fail-safes).
 
 ## Installation
@@ -60,7 +60,7 @@ cd MeshSwarm
 4. Wire MAVLink TX/RX to UART2 (pins 17/16) and Meshtastic UART to UART1 (pins 4/5).
 5. On the drone Meshtastic node enable the Serial Module in **PROTO** mode at 115200 8N1.
 
-No external MAVLink component is required; the firmware includes a minimal encoder/decoder for HEARTBEAT, COMMAND_LONG, GLOBAL_POSITION_INT, SYS_STATUS, and ATTITUDE.
+No external MAVLink component is required; the firmware includes a minimal encoder/decoder for HEARTBEAT, COMMAND_LONG, COMMAND_ACK, GLOBAL_POSITION_INT, SYS_STATUS, and ATTITUDE. The flight controller must emit HEARTBEAT so the companion can see the armed flag.
 
 ### Ground station
 
@@ -69,7 +69,7 @@ pip install -r requirements.txt
 python gcs_app.py
 ```
 
-Open `http://127.0.0.1:5000`. Leaflet assets are served locally; OSM map tiles still need network.
+Open `http://127.0.0.1:5000`. Leaflet assets are served locally; OSM map tiles still need network. The GCS process is Waitress, not the Flask development server.
 
 App-level QA without radios:
 
@@ -80,14 +80,15 @@ MESHTASTIC_FAKE=1 MESHTASTIC_API_TOKEN=qa-token python gcs_app.py
 ## Configuration
 
 * **Drone ID:** default 1. USB console `SETID:2` (persisted in NVS). Rebuild with `-DDRONE_ID=n` for a compile-time default.
-* **AES key (GCS), in order:** `MESHTASTIC_AES_KEY_FILE` (32 hex chars), `MESHTASTIC_AES_KEY`, system keyring, compiled NIST test key (dev only). Set `MESHTASTIC_PRODUCTION=1` or `MESHTASTIC_REQUIRE_KEY=1` to refuse the fallback. A configured file or env var that is missing or malformed is an error; it will not silently use the test key.
+* **AES key (GCS), in order:** `MESHTASTIC_AES_KEY_FILE` (32 hex chars), `MESHTASTIC_AES_KEY`, system keyring, compiled NIST test key (dev only). Optional per-drone keys: `MESHTASTIC_AES_KEY_<id>` (1–254). Each aircraft still holds one NVS key; set that drone’s GCS env var to the same bytes. Broadcast (255) always uses the swarm default key, so uniquely keyed aircraft will ignore swarm-wide commands. Set `MESHTASTIC_PRODUCTION=1` or `MESHTASTIC_REQUIRE_KEY=1` to refuse the fallback. A configured file or env var that is missing or malformed is an error; it will not silently use the test key.
 * **AES key (MCU):** `SETKEYSIG:<32-hex>:<ecdsa-der-hex>` generated with `python scripts/provision_key.py --hex <32 hex chars> --sign-pem /path/to/provisioning_private.pem`. Unsigned `SETKEY:` is compiled out unless `ALLOW_INSECURE_SETKEY`.
 * **Provisioning public key:** replace `provisioning_pubkey.h` and `scripts/provisioning_public.pem` before deployment. Do not commit production private keys.
-* **API token:** `MESHTASTIC_API_TOKEN`. The UI sends `Authorization: Bearer …` from the header field (stored in browser localStorage). Required for `/api/control` and `/api/telemetry` when set.
+* **API token:** `MESHTASTIC_API_TOKEN`. The UI sends `Authorization: Bearer …` from the header field (stored in browser localStorage). Required for `/api/control` and `/api/telemetry` when set. `/api/status` then hides live counts until the token is sent.
 * **Bind address:** `MESHTASTIC_GCS_HOST` / `MESHTASTIC_GCS_PORT` (default `127.0.0.1:5000`). Binding beyond localhost requires `MESHTASTIC_API_TOKEN` and a non-default AES key.
-* **Serial port:** `MESHTASTIC_SERIAL_PORT` if more than one Meshtastic device is attached.
+* **Serial port:** `MESHTASTIC_SERIAL_PORT` if more than one Meshtastic device is attached. The GCS reconnects with backoff if the serial link drops.
 * **Mesh port:** `MESHTASTIC_PORTNUM` (default 256).
-* **Heartbeat:** `MESHTASTIC_HEARTBEAT_INTERVAL` seconds (default 15; `0` disables). Aircraft RTL after `LOST_LINK_TIMEOUT_MS` (default 30000) without a valid command/heartbeat.
+* **Heartbeat:** `MESHTASTIC_HEARTBEAT_INTERVAL` seconds (default 15; `0` disables). Aircraft RTL after `LOST_LINK_TIMEOUT_MS` (default 30000) without a valid command/heartbeat. If the FC reports armed and no GCS packet is ever seen, the same timeout triggers RTL. After a GPS fix is lost for `GPS_LOSS_TIMEOUT_MS` (default 15000) while armed, the aircraft RTLs.
+* **Control rate limit:** `MESHTASTIC_CONTROL_RATE` commands per `MESHTASTIC_CONTROL_RATE_WINDOW` seconds (default 8 / 2). Heartbeats are not limited. `0` disables.
 * **Command ACK wait:** `MESHTASTIC_ACK_TIMEOUT` seconds (default 5).
 * **Geofence (GCS UI):** `MESHTASTIC_GEOFENCE_LAT`, `MESHTASTIC_GEOFENCE_LON`, `MESHTASTIC_GEOFENCE_RADIUS_M`.
 * **Geofence (aircraft RTL):** USB console `SETFENCE:<lat>:<lon>:<radius_m>` (NVS). Radius `0` disables.
@@ -100,7 +101,7 @@ MESHTASTIC_FAKE=1 MESHTASTIC_API_TOKEN=qa-token python gcs_app.py
 |---:|---|---|
 | 1 | RTL | `MAV_CMD_NAV_RETURN_TO_LAUNCH` |
 | 2 | Land | `MAV_CMD_NAV_LAND` |
-| 3 | Emergency land | `MAV_CMD_NAV_LAND` with confirmation=1 |
+| 3 | Emergency land | `MAV_CMD_NAV_LAND` with confirmation=1, retried until `COMMAND_ACK` |
 | 4 | Sync | report/advance control counter; no flight-mode change |
 | 5 | Heartbeat | link keepalive (GCS sends this automatically) |
 
@@ -116,17 +117,24 @@ The GCS refuses several unsafe combinations on startup:
 
 Operator steps:
 
-1. `pip install -r requirements-dev.txt && flake8 --jobs=1 . && mypy --ignore-missing-imports . && pytest -q`
-2. `idf.py build` from a clean checkout with ESP-IDF installed. Do not compile with `ALLOW_INSECURE_DEFAULT_KEY` or `ALLOW_INSECURE_SETKEY`.
-3. Replace `provisioning_pubkey.h` and `scripts/provisioning_public.pem`; keep the matching private key offline and never commit it
-4. Provision a non-default AES key on the GCS and every drone (`SETKEYSIG`); set `MESHTASTIC_PRODUCTION=1`
+1. `pip install -r requirements-dev.txt && flake8 --jobs=1 . && mypy --ignore-missing-imports . && pytest -q && make -C tests/host`
+2. `idf.py build` from a clean checkout with ESP-IDF installed. Do not compile with `ALLOW_INSECURE_DEFAULT_KEY` or `ALLOW_INSECURE_SETKEY`. This tree does **not** enable ESP secure boot or flash encryption; add those with your own signing keys before fielded hardware.
+3. Replace `provisioning_pubkey.h` and `scripts/provisioning_public.pem`; keep the matching private key offline and never commit it. The repo ships a test provisioning pubkey and will log a warning if it is still in the firmware.
+4. Provision a non-default AES key on the GCS and every drone (`SETKEYSIG`); set `MESHTASTIC_PRODUCTION=1`. Optionally set `MESHTASTIC_AES_KEY_<id>` for per-drone keys.
 5. Set `MESHTASTIC_API_TOKEN` (required for production and for any non-localhost bind)
 6. Set unique drone IDs, aircraft geofence (`SETFENCE`), and lost-link timeout for the site
-7. Bench-test command ACKs, replay rejection, radio-out RTL, low battery RTL, and geofence RTL with props off
+7. Confirm the flight controller’s own radio-loss failsafe is enabled. MeshSwarm RTL is a companion-computer command; it is not a substitute for the FC failsafe.
+8. Bench-test command ACKs (including FC `COMMAND_ACK`), replay rejection, radio-out RTL, never-GCS-while-armed RTL, GPS-loss RTL, low battery RTL, and geofence RTL with props off
+
+Flash GCS 0.2.0 and firmware 0.2.0 together. AES-GCM AAD is a breaking wire change versus 0.1.x.
 
 ## Tests
 
-Python unit tests cover framing, crypto, GCS routes, pubsub subscribe, fake radio, geofence flags, and logging. They do not replace a hardware-in-the-loop pass.
+* Python: `pytest -q` (framing, crypto/AAD, GCS routes, fake radio, geofence flags, logging)
+* Host firmware: `make -C tests/host` (frame CRC, MAVLink round-trip, failsafe decision table)
+* CI also builds ESP32 firmware with ESP-IDF v5.5
+
+They do not replace a hardware-in-the-loop pass.
 
 ## Disclaimer
 

@@ -17,6 +17,13 @@
 #define MAV_TYPE_GCS                   6
 #define MAV_AUTOPILOT_INVALID          8
 #define MAV_STATE_ACTIVE               4
+#define MAV_MODE_FLAG_SAFETY_ARMED     128
+#define MAV_RESULT_ACCEPTED            0
+#define MAV_RESULT_TEMPORARILY_REJECTED 1
+#define MAV_RESULT_DENIED              2
+#define MAV_RESULT_UNSUPPORTED         3
+#define MAV_RESULT_FAILED              4
+#define MAV_RESULT_IN_PROGRESS         5
 
 #ifdef __cplusplus
 extern "C" {
